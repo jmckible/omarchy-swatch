@@ -8,6 +8,12 @@ Built to stay instant at any collection size: an incremental index of every `col
 
 Plugin id `jmckible.swatch`. MIT. Not affiliated with Omarchy or 37signals.
 
+<p align="center"><img src="docs/screenshots/hero.webp" alt="Swatch previewing Tokyo Night: full-screen wallpaper, palette strip, terminal and Rails samples in the theme's colors, filmstrip of themes along the bottom" width="900"></p>
+
+| Backgrounds | Filter |
+|---|---|
+| [![A theme's backgrounds as a vertical filmstrip](docs/screenshots/backgrounds.webp)](docs/screenshots/backgrounds.webp) | [![Dark filter chip active with the strip narrowed](docs/screenshots/filter.webp)](docs/screenshots/filter.webp) |
+
 ## Install
 
 ```sh
