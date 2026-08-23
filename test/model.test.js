@@ -47,4 +47,10 @@ assert.equal(Model.backgroundAt(null, 0), "")
 assert.deepEqual(Model.ansi(T[0]), ["#1", "#2", "#3", "#4", "#5", "#6"])
 assert.equal(Model.ansi(T[1]).length, 6)
 
+
+const TV = { name: "solitude-video", video: "/b/90-storm.mp4", videoStill: "/b/90-storm.png", backgrounds: ["/b/BG1.png", "/b/90-storm.png"] }
+assert.equal(Model.defaultBgIndex(TV), 1)
+assert.equal(Model.defaultBgIndex(T[0]), 0)
+assert.equal(Model.defaultBgIndex(null), 0)
+
 console.log("ok")

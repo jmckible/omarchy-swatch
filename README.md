@@ -8,11 +8,12 @@ Built to stay instant at any collection size: an incremental index of every `col
 
 Plugin id `jmckible.swatch`. MIT. Not affiliated with Omarchy or 37signals.
 
-<p align="center"><img src="docs/screenshots/hero.webp" alt="Swatch previewing Tokyo Night: full-screen wallpaper, palette strip, terminal and Rails samples in the theme's colors, filmstrip of themes along the bottom" width="900"></p>
+<p align="center"><img src="docs/screenshots/demo.gif" alt="Scrubbing through themes full-screen, then a theme's video intro playing and settling into its wallpaper" width="900"></p>
+<p align="center"><sub>Theme intro in the demo: <a href="https://x.com/yamzeight/status/2089340897326469186">Omarchy 4.1 video-background teaser by @yamzeight</a> — local test footage, not included in this repo.</sub></p>
 
-| Backgrounds | Filter |
-|---|---|
-| [![A theme's backgrounds as a vertical filmstrip](docs/screenshots/backgrounds.webp)](docs/screenshots/backgrounds.webp) | [![Dark filter chip active with the strip narrowed](docs/screenshots/filter.webp)](docs/screenshots/filter.webp) |
+| Preview | Backgrounds | Filter |
+|---|---|---|
+| [![Swatch previewing Tokyo Night full-screen](docs/screenshots/hero.webp)](docs/screenshots/hero.webp) | [![A theme's backgrounds as a vertical filmstrip](docs/screenshots/backgrounds.webp)](docs/screenshots/backgrounds.webp) | [![Dark filter chip active with the strip narrowed](docs/screenshots/filter.webp)](docs/screenshots/filter.webp) |
 
 ## Install
 

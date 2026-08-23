@@ -70,6 +70,7 @@ Item {
     selectionFile = String(args.selectionFile || "")
     doneFile = String(args.doneFile || "")
     applying = false
+    videoTheme = ""   // reopening on the same theme replays its intro
     filterText = ""
     modeFilter = "all"
     opened = true
@@ -151,7 +152,7 @@ Item {
     var next = wrap ? Model.wrap(selectedIndex + delta, rows.length) : Model.clamp(selectedIndex + delta, rows.length)
     if (next === selectedIndex) return
     selectedIndex = next
-    bgIndex = 0
+    bgIndex = Model.defaultBgIndex(rows[next])
   }
 
   function jumpTo(index) {
@@ -159,7 +160,7 @@ Item {
     var next = Model.clamp(index, rows.length)
     if (next === selectedIndex) return
     selectedIndex = next
-    bgIndex = 0
+    bgIndex = Model.defaultBgIndex(rows[next])
   }
 
   function moveBackground(delta) {
@@ -211,14 +212,27 @@ Item {
     stageVideo()
   }
 
+  // The clip is the theme's intro: it plays once when you arrive on the
+  // theme, over the background that is actually selected, then the fade
+  // reveals that background. Scrubbing backgrounds stops it; leaving the
+  // theme and coming back replays it from frame 0.
+  property string videoTheme: ""
   function stageVideo() {
     var t = selected
-    var src = t && t.video ? Util.fileUrl(t.video) : ""
-    if (String(player.source) === src && src) return
+    if (!t || !t.video) {
+      videoTheme = ""
+      player.stop()
+      player.source = ""
+      return
+    }
+    if (t.name === videoTheme) return   // same theme: a background scrub, not an arrival
+    videoTheme = t.name
     player.stop()
-    player.source = src
-    if (src) player.play()
+    player.source = Util.fileUrl(t.video)
+    player.play()
   }
+
+  onBgIndexChanged: if (opened && selected && selected.name === videoTheme && player.playbackState === MediaPlayer.PlayingState) player.stop()
 
   // ---------------------------------------------------------------- preview
 
@@ -274,9 +288,15 @@ Item {
 
   MediaPlayer {
     id: player
-    loops: MediaPlayer.Infinite
-    videoOutput: video
+    videoOutput: video   // plays once; EndOfMedia stops it and the fade reveals the still
   }
+
+  // The handoff starts before the clip ends, so motion is still alive while
+  // the background comes through; the background then settles from a slight
+  // zoom. Both are content-agnostic.
+  readonly property bool introEnding: player.playbackState === MediaPlayer.PlayingState
+    && player.duration > 0 && player.position >= player.duration - 600
+  onIntroEndingChanged: if (introEnding) settleAnim.restart()
 
   // ---------------------------------------------------------------- window
 
@@ -305,6 +325,18 @@ Item {
 
       Rectangle { anchors.fill: parent; color: root.bg }
 
+      Item {
+        id: wallpaperLayer
+        anchors.fill: parent
+        NumberAnimation {
+          id: settleAnim
+          target: wallpaperLayer
+          property: "scale"
+          from: 1.025; to: 1.0
+          duration: 1400
+          easing.type: Easing.OutCubic
+        }
+
       Repeater {
         id: wallpapers
         model: root.slotCount
@@ -322,13 +354,14 @@ Item {
           onStatusChanged: if (status === Image.Ready && root.slots[index] === root.selectedBackground) root.shownBackground = root.selectedBackground
         }
       }
+      }
 
       VideoOutput {
         id: video
         anchors.fill: parent
         fillMode: VideoOutput.PreserveAspectCrop
-        opacity: player.playbackState === MediaPlayer.PlayingState ? 1 : 0
-        Behavior on opacity { NumberAnimation { duration: 350 } }
+        opacity: player.playbackState === MediaPlayer.PlayingState && !root.introEnding ? 1 : 0
+        Behavior on opacity { NumberAnimation { duration: root.introEnding ? 900 : 350; easing.type: Easing.InOutQuad } }
       }
 
       // Scrims: a light lid at the top for the title, a heavier one at the
@@ -402,7 +435,7 @@ Item {
           Text { text: root.selected ? (root.selected.source === "user" ? "installed" : "stock") + (root.selected.shadowsStock ? " (shadows stock)" : "") : ""; color: root.fg; font.family: Style.fontFamily; font.pixelSize: root.metaPx }
           Text { text: "·"; color: root.fg; opacity: 0.45; font.family: Style.fontFamily; font.pixelSize: root.metaPx }
           Text { text: root.selected ? root.selected.backgrounds.length + " background" + (root.selected.backgrounds.length === 1 ? "" : "s") : ""; color: root.fg; font.family: Style.fontFamily; font.pixelSize: root.metaPx }
-          Text { visible: !!(root.selected && root.selected.video); text: "· video"; color: root.accent; font.family: Style.fontFamily; font.pixelSize: root.metaPx }
+          Text { visible: !!(root.selected && root.selected.video); text: player.playbackState === MediaPlayer.PlayingState ? "· video ▶" : "· video"; color: root.accent; font.family: Style.fontFamily; font.pixelSize: root.metaPx }
           Text { visible: root.selected && root.selected.name === root.currentTheme; text: "· current"; color: root.fg; opacity: 0.7; font.family: Style.fontFamily; font.pixelSize: root.metaPx }
         }
         Row {
@@ -660,7 +693,7 @@ Item {
           cacheBuffer: stripArea.thumbW * 12
           reuseItems: true
           boundsBehavior: Flickable.StopAtBounds
-          onCurrentIndexChanged: if (currentIndex !== root.selectedIndex && currentIndex >= 0) { root.selectedIndex = currentIndex; root.bgIndex = 0 }
+          onCurrentIndexChanged: if (currentIndex !== root.selectedIndex && currentIndex >= 0) { root.selectedIndex = currentIndex; root.bgIndex = Model.defaultBgIndex(root.rows[currentIndex]) }
 
           delegate: Item {
             id: cell
@@ -726,7 +759,7 @@ Item {
             }
             MouseArea {
               anchors.fill: parent
-              onClicked: { root.selectedIndex = cell.index; root.bgIndex = 0 }
+              onClicked: { root.selectedIndex = cell.index; root.bgIndex = Model.defaultBgIndex(cell.modelData) }
               onDoubleClicked: { root.selectedIndex = cell.index; root.apply() }
             }
           }

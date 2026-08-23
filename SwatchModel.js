@@ -55,11 +55,19 @@ function backgroundAt(theme, bgIndex) {
   return bgs[clamp(bgIndex, bgs.length)]
 }
 
+// Where selection lands within a theme's backgrounds: on the video's paired
+// still when there is one, so the clip settles into what stays on screen.
+function defaultBgIndex(theme) {
+  if (!theme || !theme.video || !theme.videoStill) return 0
+  var i = (theme.backgrounds || []).indexOf(theme.videoStill)
+  return i === -1 ? 0 : i
+}
+
 function ansi(theme) {
   var c = theme && theme.colors ? theme.colors : {}
   return [c.red, c.yellow, c.green, c.cyan, c.blue, c.magenta].map(function(x) { return x || "#808080" })
 }
 
 if (typeof module !== "undefined") {
-  module.exports = { matches: matches, filter: filter, nextMode: nextMode, indexOf: indexOf, findByName: findByName, clamp: clamp, wrap: wrap, backgroundAt: backgroundAt, ansi: ansi, MODES: MODES }
+  module.exports = { matches: matches, filter: filter, nextMode: nextMode, indexOf: indexOf, findByName: findByName, clamp: clamp, wrap: wrap, backgroundAt: backgroundAt, defaultBgIndex: defaultBgIndex, ansi: ansi, MODES: MODES }
 }

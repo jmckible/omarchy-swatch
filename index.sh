@@ -22,7 +22,7 @@ video_find=(-type f \( -iname '*.mp4' -o -iname '*.webm' -o -iname '*.mkv' -o -i
 sig() {
   local d=$1 f
   {
-    echo v2   # record schema version: bump when resolve() output changes
+    echo v4   # record schema version: bump when resolve() output changes
     stat -Lc '%Y' "$d"
     [[ -d $d/backgrounds ]] && stat -Lc 'bg:%Y' "$d/backgrounds"
     [[ -d $HOME/.config/omarchy/backgrounds/${d##*/} ]] && stat -Lc 'ubg:%Y' "$HOME/.config/omarchy/backgrounds/${d##*/}"
@@ -54,19 +54,32 @@ resolve() {
   bgs=$( { find -L "$HOME/.config/omarchy/backgrounds/$name" -maxdepth 1 "${image_find[@]}" -print 2>/dev/null
            find -L "$path/backgrounds" -maxdepth 1 "${image_find[@]}" -print 2>/dev/null; } | sort )
   [[ -n $preview ]] || preview=$(head -n1 <<<"$bgs")
+  video=$( { find -L "$HOME/.config/omarchy/backgrounds/$name" -maxdepth 1 "${video_find[@]}" -print 2>/dev/null
+             find -L "$path/backgrounds" -maxdepth 1 "${video_find[@]}" -print 2>/dev/null; } | sort | head -n1 )
+  # The video is the theme's intro, not a wallpaper. A still sharing its
+  # basename is its poster frame: recorded as videoStill and excluded from
+  # the selectable backgrounds (stock tooling never globs videos at all).
+  local video_still="" vstem b bstem
+  if [[ -n $video ]]; then
+    vstem=${video##*/}; vstem=${vstem%.*}
+    while IFS= read -r b; do
+      [[ -n $b ]] || continue
+      bstem=${b##*/}; bstem=${bstem%.*}
+      [[ $bstem == "$vstem" ]] && { video_still=$b; break; }
+    done <<<"$bgs"
+    [[ -n $video_still ]] && bgs=$(grep -vxF "$video_still" <<<"$bgs")
+  fi
   # One filmstrip thumb per background, keyed by path + stat so a replaced
   # file gets a new thumb. Cold path only; the record caches the names.
-  local bgthumbs="" b
+  local bgthumbs=""
   while IFS= read -r b; do
     [[ -n $b ]] || continue
     bgthumbs+="$thumbs/bg-$(printf '%s\t%s' "$b" "$(stat -Lc '%s:%Y' "$b" 2>/dev/null)" | md5sum | cut -c1-16).jpg"$'\n'
   done <<<"$bgs"
-  video=$( { find -L "$HOME/.config/omarchy/backgrounds/$name" -maxdepth 1 "${video_find[@]}" -print 2>/dev/null
-             find -L "$path/backgrounds" -maxdepth 1 "${video_find[@]}" -print 2>/dev/null; } | sort | head -n1 )
 
   omarchy-theme-color --file "$colors" --all 2>/dev/null | jq -Rs \
     --arg name "$name" --arg src "$src" --arg path "$path" --arg sig "$s" \
-    --arg preview "$preview" --arg video "$video" \
+    --arg preview "$preview" --arg video "$video" --arg videoStill "$video_still" \
     --arg thumb "$( [[ -n $preview ]] && printf '%s/%s-%s.jpg' "$thumbs" "$name" "$key" )" \
     --arg bgs "$bgs" --arg bgthumbs "$bgthumbs" \
     --rawfile colors "$colors" --rawfile shell "$shell" '
@@ -76,7 +89,7 @@ resolve() {
         source: $src, path: $path, signature: $sig,
         mode: (($c.mode // "dark") | ascii_downcase),
         colors: ($c | {background, foreground, accent, selection, muted, red, yellow, green, cyan, blue, magenta}),
-        preview: $preview, thumb: $thumb, video: $video,
+        preview: $preview, thumb: $thumb, video: $video, videoStill: $videoStill,
         backgrounds: ($bgs | split("\n") | map(select(length > 0))),
         bgThumbs: ($bgthumbs | split("\n") | map(select(length > 0))),
         colorsToml: $colors, shellToml: $shell }'
