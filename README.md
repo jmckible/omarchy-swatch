@@ -58,7 +58,8 @@ theme=$(~/.config/omarchy/plugins/jmckible.swatch/pick.sh) && omarchy theme set 
 - `index.sh` walks `~/.config/omarchy/themes` and the stock themes, resolves each `colors.toml` through `omarchy-theme-color` (so legacy keys and aliases match what `theme set` produces), and writes `~/.cache/omarchy/swatch/index.json`. Records are reused when a theme's signature (dir mtime + `colors.toml`/`shell.toml`/preview stat) is unchanged; only changed themes are re-resolved.
 - `thumbs.sh` makes 640×360 filmstrip thumbs for any record that lacks one. It runs on every open and does nothing when nothing is missing.
 - Live preview is the same call `omarchy theme set` makes over IPC (`shell applyTheme`) — shell-only, reverted on cancel, never written to disk. Terminal palettes and Hyprland borders change on apply, not during preview.
-- Video: the first `backgrounds/*.mp4|webm` plays muted on loop from frame 0 over the still, via the shell's own Qt Multimedia. Only the selected theme decodes video.
+- Video: `backgrounds/foo.mp4` is a theme intro. It plays once, muted, when you arrive on the theme, then dissolves into the selected background. A still with the same stem (`foo.png`) is its poster frame and is not offered as a wallpaper. Stock tooling never globs videos, so this is invisible to `omarchy theme set`. Only the selected theme's video is opened. (Convention proposed ahead of Omarchy 4.1; expect it to change.)
+- Themes are treated as untrusted input. Inside a theme, symlinks are never followed and every file must be a regular file under that theme's directory, within size and count ceilings (64 KB TOML, 64 MB / 50 MP images, 200 backgrounds, 512 themes). Image decoding runs single-threaded under a timeout and memory limit, at most four at a time, and only ever writes to `~/.cache/omarchy/swatch/`.
 
 ## Remove
 
