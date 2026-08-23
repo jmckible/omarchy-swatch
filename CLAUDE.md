@@ -4,16 +4,19 @@ Omarchy shell plugin (Quickshell/QML + bash). Id `jmckible.swatch`, repo `jmckib
 
 ## What matters
 
-- **Everything in the preview looks like the theme.** The candidate's wallpaper fills the screen, the chrome is painted from its palette, and the real shell retints via `Color.loadColors` / `Color.loadShell` / `Style.scheduleRefresh` — the same calls `omarchy theme set` makes over `shell applyTheme` IPC. Preview is shell-only and reverted on cancel; nothing is written to disk until Enter runs the stock `omarchy-theme-set`.
-- **Instant at any collection size.** `index.sh` is incremental (per-theme signature → record reused), cards paint from palette before any image decodes, the filmstrip is a recycled `ListView`, and at most five screen-size wallpapers are resident (`slots` in `Swatch.qml`). Don't add anything to the open path that scales with theme count.
+- **Everything in the preview looks like the theme.** The candidate's wallpaper fills the screen, the chrome is painted from its palette, and the real shell retints via `Color.loadColors` / `Color.loadShell` / `Style.scheduleRefresh` — the same calls `omarchy theme set` makes over `shell applyTheme` IPC. Preview is shell-only and reverted on cancel; nothing is written to disk until Enter runs the stock `omarchy-theme-set` (through `apply.sh`, argv only).
+- **Instant at any collection size.** `index.sh` is incremental (per-theme signature → record reused, resolve loop stops at a 14 s budget and finishes next open), cards paint from palette before any image decodes, the filmstrip is a recycled `ListView`, and at most five screen-size wallpapers are resident (`slots` in `Swatch.qml`). Don't add anything to the open path that scales with theme count.
+- **The shell never opens a theme file.** Every pixel the overlay shows is a derivative `thumbs.sh` produced in our cache (`stage-<key>-WxH.jpg` at the screen's size, `bg-<key>.jpg` for filmstrips); every byte `index.sh` parses came through `read_bounded`. See the security posture below — this is the whole reason for the design.
 - **Never edit user configuration.** Routing the hotkey is a line the user adds to `~/.config/omarchy/extensions/omarchy-menu.jsonc` themselves. The plugin writes only `~/.cache/omarchy/swatch/`.
-- **No dependencies beyond Omarchy's own** (`jq`, `vipsthumbnail`, `omarchy-theme-color`). `qt6-imageformats` is needed only for webp wallpapers and is the shell's problem, not ours.
+- **No dependencies beyond Omarchy's own** (`jq`, `vips`, `omarchy-theme-color`, `python3` — perl fallback — for the one syscall bash cannot make).
 
 ## Layout
 
-- `Swatch.qml` — the overlay. Lifecycle contract with the shell: `open(payloadJson)`, `close()`, `opened` property. `shell`, `manifest`, `omarchyPath` are injected by the shell's Loader.
-- `SwatchModel.js` — pure functions (`.pragma library`), tested by `node test/model.test.js`.
-- `index.sh` → `~/.cache/omarchy/swatch/index.json`. `thumbs.sh` makes 640×360 filmstrip thumbs, idempotent, runs every open. `pick.sh` is the CLI round-trip (prints the chosen name; applies nothing).
+- `Swatch.qml` — the overlay. Lifecycle contract with the shell: `open(payloadJson)`, `close()`, `opened` property. `shell`, `manifest`, `omarchyPath` are injected by the shell's Loader. `CacheImage` (inline component) is how every image is shown: a load that fails is retried on `cacheGen` ticks while `thumbs.sh` runs, declaratively, so bindings survive. Geometry goes through `root.sp()`/`root.fz.*`, frozen from `Style` at each `open()` — never `Style.space`/`Style.font` directly — so a candidate whose `shell.toml` sets `[spacing] scale` or font sizes re-lays out the real shell (faithful) but not the picker (see `freezeMetrics`).
+- `SwatchModel.js` — pure functions (`.pragma library`), tested by `node test/model.test.js`. `keyAt`/`thumbPath`/`stagePath` map a selection to cache files.
+- `lib.sh` — ceilings and `read_bounded`/`snapshot`, sourced by the scripts.
+- `index.sh` → `~/.cache/omarchy/swatch/index.json` (`version: 2`, `thumbsDir`, `partial`, per-theme `previewKey`/`bgKeys`). `thumbs.sh` makes the derivatives, idempotent, runs every open, sweeps files whose key left the index. `apply.sh` is the only writer besides the cache: `apply.sh <theme> [bg]` applies, `apply.sh --pick <dir> [theme]` answers `pick.sh`, whose payload is `{dir}` (a `mktemp -d`; files are created noclobber).
+- `test/hostile.sh` — the hostile-fixture check, isolated `HOME`. Run it after touching any script.
 
 ## Dev loop
 
@@ -22,36 +25,36 @@ ln -sfn "$PWD" ~/.config/omarchy/plugins/jmckible.swatch   # once
 omarchy restart shell        # after ANY QML edit — see below
 ./index.sh | jq '.themes | length'
 node test/model.test.js
+bash test/hostile.sh
 omarchy plugin validate .
 ```
 
 - The shell's plugin hot-reload cannot load new QML: `Qt.clearComponentCache` is undefined in this engine, so "Local plugin changed, reloading" re-mounts the cached component. Only `omarchy restart shell` picks up QML changes. Scripts are read fresh on every open.
-- Verify a build actually loaded with `omarchy-shell shell call jmckible.swatch <method> ''` — `ok` means the method exists on the mounted item; `unknown` means old code.
-- Don't open the picker on the user's screen or inject keys without asking; ask them to drive and read the shell log instead: `journalctl --user --since '-60s' | grep -i swatch`.
+- Verify a build actually loaded with `omarchy-shell shell call jmckible.swatch <method> ''` — `ok` means the method exists on the mounted item; `unknown` means old code. `finishPick` exists only from 0.2.0.
+- Don't open the picker on the user's screen or inject keys without asking; ask them to drive and read the shell log instead: `journalctl --user --since '-60s' | grep -i swatch`. During a cold cache expect `QML Image: Cannot open` lines — that is `CacheImage` retrying derivatives that don't exist yet.
 - `qmllint -I ~/.local/share/omarchy/shell -I /usr/lib/qt6/qml Swatch.qml` catches syntax; import warnings for `qs.*` are expected.
 
 ## Index rules
 
 - Bump the `echo vN` line in `sig()` whenever `resolve()`'s record shape changes; that is what invalidates cached records.
 - User themes shadow stock themes of the same name (`shadowsStock`), the way `omarchy-theme-set` overlays them.
-- Video convention: `backgrounds/foo.mp4` is a theme intro. A still with the same stem (`foo.png`) is its poster, recorded as `videoStill` and **excluded** from selectable backgrounds. Stock tooling globs only images, so both are invisible to it. This is a proposal ahead of Omarchy 4.1; expect it to change.
-- Test footage for the video path is local only (`~/.config/omarchy/themes/solitude-video`, yamzeight's teaser clip). Never commit it; credit it wherever it appears in motion.
+- An image's cache key is md5(path, size:mtime)[:16]; a replaced file gets new derivatives and the old ones are swept. The stage size is the largest connected monitor in physical pixels, from `hyprctl monitors -j` in `index.sh` (`stageW/H` in the index; Qt rounds `devicePixelRatio` under fractional scaling, so QML cannot know it — 3840×2160 @ 1.6 came out as 4800×2700). It is part of the filename, never upscaled (`WxH>`), and a size unused for 30 days expires.
+- Video intros are not in this branch. The implementation (`backgrounds/foo.mp4` as intro, same-stem still as poster) is bookmarked on the `video` branch at `7f61216`; revive it only with a snapshot + `ffprobe` gate in front of `MediaPlayer`, after Omarchy 4.1 defines how the shell plays them. The test footage (`~/.config/omarchy/themes/solitude-video`, yamzeight's teaser) is local only; never commit it, credit it wherever it appears in motion.
 
 ## Security posture (keep it)
 
-An installed theme is untrusted input — anyone can `omarchy theme install` a hostile repo — and the marketplace review (issue #1933) holds us to that. The rules, all in `index.sh` / `thumbs.sh`:
+An installed theme is untrusted input — anyone can `omarchy theme install` a hostile repo — and the marketplace review (issue #1933) holds us to that with a fixed rubric: the long-lived shell must be unaffected by anything a same-user file swap can do. Arguing threat model gets nowhere; conform to the rubric and reply in its vocabulary (descriptor-bound, no-follow, overflow rejection, producer-side ceiling, exclusive create, deadline).
 
-- A theme *directory* may be a symlink (that's how themes get developed). Nothing inside one is followed: `find -H`, `-type f`, and `safe_file()` require a regular non-symlink file whose `realpath` stays under the theme dir or `~/.config/omarchy/backgrounds/<name>`.
-- Ceilings before anything is retained: 512 themes, 200 backgrounds per theme, 512-byte paths, 64 KB TOML files, 256 MB videos, 8 MB cached index (and it must parse as `{themes: []}`). Theme names must match `^[A-Za-z0-9][A-Za-z0-9._-]*$` — they become thumb filenames and `omarchy-theme-set` arguments.
-- The whole index run sits under a 20 s `timeout`.
-- Before an image reaches vips: regular file, ≤ 64 MB, `vipsheader` loader in `jpegload|pngload|webpload|gifload`, ≤ 50 MP. Each decode is single-threaded, `timeout 20s`, `ulimit -v 2 GB`, parallelism ≤ 4, ≤ 512 jobs per run, and may only write under our thumbs dir.
-- In QML, every `Image` sets `sourceSize`, so decodes are bounded to the display; Qt's own allocation limit covers the rest. Only the selected theme's video is opened.
+- **One trust decision, on a descriptor.** `read_bounded` (lib.sh) opens with `O_NOFOLLOW|O_NONBLOCK`, `fstat`s that descriptor (regular, ≤ cap, resolved under the theme dir when roots are given), reads through it with one-byte-past-the-ceiling rejection. Nothing checks a pathname and then opens the pathname again. No owner/mode check — stock themes are root-owned under `/usr/share/omarchy`, the un-swappable case.
+- **Consumers read snapshots.** TOML → run-private scratch → `omarchy-theme-color` / `jq --rawfile`. Images → snapshot → `vipsheader` (loader allowlist, ≤ 50 MP) → `vipsthumbnail` on the same snapshot, single-threaded, `timeout`, `ulimit -v 2 GB`, ≤ 4 parallel, output checked (vips exits 0 on garbage). A refused source gets a `reject-<key>` marker so it isn't copied again every open. The QML only ever loads derivatives; the index paths it holds are for `omarchy-theme-bg-set` and matching, never for pixels.
+- **Ceilings before retention, producer-side.** 512 themes, 200 backgrounds, 4096 readdir entries per dir, 64-byte names matching `^[A-Za-z0-9][A-Za-z0-9._-]*$`, 512-byte paths, 32 KB TOML, 16 KB palette, 64 MB images, 8 MB index (refused, not truncated, on both write and read). Every external producer has its own `timeout`; `index.sh` runs under 20 s, `thumbs.sh` under 600 s.
+- **Writes.** Only under `~/.cache/omarchy/swatch/` and a `pick.sh` dir: `mktemp` siblings + `mv`, noclobber for the pick files. Palette values are shaped to `#rrggbb[aa]` in jq before they can reach a `<span style>`; theme names render `Text.PlainText`.
 
-When touching these scripts, re-run the hostile-fixture check: a theme with `colors.toml → /etc/passwd`, a >64 KB `shell.toml`, a symlinked background, 230 backgrounds, a 60 MP PNG, and a theme named `bad name` must yield: defaults palette, empty shell, no symlink in the list, 200 backgrounds, no thumb for the bomb, and no record for the bad name.
+`bash test/hostile.sh` encodes all of this (symlinked/FIFO/oversize TOML, symlinked and out-of-tree backgrounds, 230 backgrounds, a 60 MP PNG, an SVG named `.png`, a 70 MB file, an invalid name, hostile colour values, a corrupt cache, stale cache files). Keep it green.
 
 ## Shell APIs relied on
 
-`Color.loadColors/loadShell`, `Style.scheduleRefresh`, `Style.space/font/fontFamily`, `Util.fileUrl/alpha/shellQuote/editsFilter/editedFilter`, `shell.bar.position/barSize` (leaves the real bar's band unpainted so the live retint is visible), `shell.hide(id)`. If `Color.loadColors` moves, the fallback is `Quickshell.execDetached(["omarchy-shell","shell","applyTheme", b64(colors), b64(shell)])`.
+`Color.loadColors/loadShell`, `Style.scheduleRefresh`, `Style.effectiveSpacingScale/font/fontFamily` (read once per open), `Util.fileUrl/alpha/editsFilter/editedFilter`, `shell.bar.position/barSize` (leaves the real bar's band unpainted so the live retint is visible), `shell.hide(id)`. If `Color.loadColors` moves, the fallback is `Quickshell.execDetached(["omarchy-shell","shell","applyTheme", b64(colors), b64(shell)])`.
 
 ## Releasing
 

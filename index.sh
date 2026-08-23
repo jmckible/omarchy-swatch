@@ -4,54 +4,47 @@
 # unchanged, so a warm run is a find, a stat loop, and two jq calls. Only
 # themes whose files changed pay for omarchy-theme-color.
 #
-# Trust model: an installed theme is untrusted input (anyone can
-# `omarchy theme install` a hostile repo). A theme directory may itself be a
-# symlink (that is how people develop themes), but nothing *inside* one is
-# followed: every file must be a regular, non-symlink file that resolves
-# under the theme's own directory or the user's per-theme backgrounds dir,
-# within size and count ceilings, or it is ignored.
+# The index is an inventory, not a trust decision. The paths it records are
+# names; the one consumer that decodes them (thumbs.sh — the shell itself
+# never opens a theme file) re-establishes trust on the descriptor it reads.
+# The bytes this script parses — two TOML files per theme, the cached index,
+# the state files — arrive only through read_bounded (lib.sh).
 set -uo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 # One deadline for the whole run, so a pathological tree cannot hang the shell.
 if [[ ${SWATCH_INDEX_WRAPPED:-0} != 1 ]] && command -v timeout >/dev/null; then
   export SWATCH_INDEX_WRAPPED=1
   exec timeout --signal=TERM --kill-after=2s 20s /bin/bash "$0" "$@"
 fi
+RESOLVE_BUDGET=14   # seconds; themes not resolved by then land on a later open
 
-MAX_THEMES=512
-MAX_BACKGROUNDS=200
-MAX_PATH_BYTES=512
-MAX_TOML_BYTES=65536        # colors.toml / shell.toml are hundreds of bytes to a few KB
-MAX_VIDEO_BYTES=268435456   # 256 MB
-MAX_IMAGE_BYTES=67108864    # 64 MB — 4K PNG wallpapers run 10–30 MB
-MAX_PIXELS=50000000         # 50 MP — 8K is 33 MP
-LOADERS='^(jpegload|pngload|webpload|gifload)$'
-MAX_INDEX_BYTES=8388608     # cached index.json larger than this is discarded
-NAME_RE='^[A-Za-z0-9][A-Za-z0-9._-]*$'
-
-cache=${XDG_CACHE_HOME:-$HOME/.cache}/omarchy/swatch
-thumbs=$cache/thumbs
-index=$cache/index.json
+cache=$SWATCH_CACHE; thumbs=$SWATCH_THUMBS; index=$SWATCH_INDEX
 user_themes=$HOME/.config/omarchy/themes
 user_bgs=$HOME/.config/omarchy/backgrounds
 stock_themes=${OMARCHY_PATH:-$HOME/.local/share/omarchy}/themes
 state=$HOME/.local/state/omarchy/current
 mkdir -p "$thumbs"
 
+# Private scratch for this run: TOML snapshots and the legacy-theme conversion.
+run=$(mktemp -d "${XDG_RUNTIME_DIR:-$cache}/swatch-index.XXXXXXXX") || exit 1
+trap 'rm -rf -- "$run"' EXIT
+rows=$run/rows; fresh=$run/fresh
+
 # The cached index is our own output, but it lives in a writable cache dir:
-# size-cap it and require valid JSON of the expected shape before trusting it.
+# it comes in through the same bounded descriptor as everything else and
+# must have the expected shape before any record is reused.
 prev='{"themes":[]}'
-if [[ -f $index && ! -L $index ]] && (( $(stat -c %s "$index") <= MAX_INDEX_BYTES )); then
-  if jq -e '.themes | type == "array"' "$index" >/dev/null 2>&1; then
-    prev=$(cat "$index")
-  fi
+if p=$(read_bounded "$index" "$MAX_INDEX_BYTES") && jq -e '.themes | type == "array"' <<<"$p" >/dev/null 2>&1; then
+  prev=$p
 fi
 
 image_find=(-type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.webp' -o -iname '*.gif' \))
-video_find=(-type f \( -iname '*.mp4' -o -iname '*.webm' -o -iname '*.mkv' -o -iname '*.mov' \))
 
-# Regular, non-symlink file whose real path stays under one of the allowed
-# roots, with a bounded path length and (optionally) byte size.
+# Inventory filter, advisory only: a directory entry is listed when it is a
+# regular non-symlink file with a bounded path that resolves under one of
+# the allowed roots and is not absurdly large. Nothing is decided from this;
+# thumbs.sh re-verifies on the descriptor it decodes.
 safe_file() {
   local f=$1 max=${2:-0} real root ok=0
   [[ -f $f && ! -L $f ]] || return 1
@@ -68,7 +61,7 @@ safe_file() {
 sig() {
   local d=$1 f
   {
-    echo v5   # record schema version: bump when resolve() output changes
+    echo v6   # record schema version: bump when resolve() output changes
     stat -Lc '%Y' -- "$d"
     [[ -d $d/backgrounds ]] && stat -c 'bg:%Y' -- "$d/backgrounds"
     [[ -d $user_bgs/${d##*/} ]] && stat -c 'ubg:%Y' -- "$user_bgs/${d##*/}"
@@ -78,148 +71,137 @@ sig() {
   } 2>/dev/null | paste -sd,
 }
 
-# Images we are willing to decode later (full-size in the overlay, thumbs in
-# thumbs.sh): byte cap, then loader and pixel count from the header. One
-# vipsheader call per batch reads only headers — the decoder is never
-# touched here. A file that fails to parse is dropped; order is preserved.
-filter_images() {
-  local -a files=() keep=()
-  local f line rest w h loader
-  while IFS= read -r f; do
-    [[ -n $f ]] || continue
-    (( $(stat -c %s -- "$f") <= MAX_IMAGE_BYTES )) && files+=("$f")
-  done
-  (( ${#files[@]} )) || return 0
-  declare -A ok=()
-  while IFS= read -r line; do
-    # "<path>: <W>x<H> <fmt>, <bands> band(s), <space>, <loader>" — parse from
-    # the right so a ": " inside the path cannot confuse it.
-    [[ $line =~ ^(.*):\ ([0-9]+)x([0-9]+)\ [^,]+,\ [0-9]+\ bands?,\ [^,]+,\ ([a-z0-9]+)$ ]] || continue
-    f=${BASH_REMATCH[1]}; w=${BASH_REMATCH[2]}; h=${BASH_REMATCH[3]}; loader=${BASH_REMATCH[4]}
-    [[ $loader =~ $LOADERS ]] || continue
-    (( w * h <= MAX_PIXELS )) || continue
-    ok["$f"]=1
-  done < <(timeout 10s vipsheader -- "${files[@]}" 2>/dev/null)
-  for f in "${files[@]}"; do [[ ${ok["$f"]:-} ]] && printf '%s\n' "$f"; done
+# Files directly inside a directory: no symlinks followed, at most
+# MAX_DIR_ENTRIES readdir entries considered, sorted, filtered, capped.
+list_files() {
+  local dir=$1 max=$2; shift 2
+  [[ -d $dir ]] || return 0
+  find -H "$dir" -mindepth 1 -maxdepth 1 "$@" -print0 2>/dev/null | head -z -n "$MAX_DIR_ENTRIES" | sort -z |
+    while IFS= read -r -d '' f; do safe_file "$f" "$MAX_IMAGE_BYTES" && printf '%s\n' "$f"; done | head -n "$max"
 }
 
-# Files directly inside a directory, without following symlinks, filtered
-# through safe_file (and filter_images when asked), sorted, capped.
-list_files() {
-  local dir=$1 max=$2 kind=$3; shift 3
-  [[ -d $dir ]] || return 0
-  local listing
-  listing=$(find -H "$dir" -mindepth 1 -maxdepth 1 "$@" -print0 2>/dev/null | sort -z |
-    while IFS= read -r -d '' f; do safe_file "$f" && printf '%s\n' "$f"; done | head -n "$max")
-  if [[ $kind == image ]]; then filter_images <<<"$listing"; else printf '%s\n' "$listing"; fi | grep -v '^$'
+# One cache key per image, from its path and stat, so a replaced file gets
+# new derivatives. thumbs.sh names bg-<key>.jpg and stage-<key>-WxH.jpg by it.
+image_key() { printf '%s\t%s' "$1" "$(stat -c '%s:%Y' -- "$1" 2>/dev/null)" | md5sum | cut -c1-16; }
+
+# Stage size: the largest connected monitor, in physical pixels. (Qt rounds
+# devicePixelRatio under fractional scaling, so the QML side cannot know this.)
+# Compositor output is a producer like any other — deadline, byte ceiling,
+# shape and range check — or a sane default.
+stage_size() {
+  local out w h
+  out=$(timeout 3s hyprctl monitors -j 2>/dev/null | head -c 65536)
+  read -r w h < <(jq -r 'if type == "array" then
+      (map(select((.width | type) == "number" and (.height | type) == "number")) | max_by(.width * .height) // {}
+       | "\(.width // 0 | floor) \(.height // 0 | floor)") else "0 0" end' <<<"$out" 2>/dev/null)
+  [[ $w =~ ^[0-9]+$ && $h =~ ^[0-9]+$ ]] && (( w >= 320 && w <= 7680 && h >= 200 && h <= 4320 )) || { w=2560; h=1440; }
+  printf '%s %s' "$w" "$h"
 }
 
 resolve() {
   local path=$1 src=$2 name=${1##*/}
-  local real colors=/dev/null shell=/dev/null preview="" video="" s key tmp="" b bstem vstem
+  local real s colors=/dev/null shell=/dev/null preview="" pkey="" bgs bgkeys="" b pal n
   real=$(realpath -e -- "$path" 2>/dev/null) || return 0
   ALLOWED_ROOTS=("$real" "$(realpath -e -- "$user_bgs/$name" 2>/dev/null || true)")
   s=$(sig "$path")
-  key=$(printf '%s' "$s" | md5sum | cut -c1-12)
 
-  safe_file "$path/colors.toml" "$MAX_TOML_BYTES" && colors=$path/colors.toml
-  safe_file "$path/shell.toml" "$MAX_TOML_BYTES" && shell=$path/shell.toml
+  # Each TOML is read once, through one descriptor, into this run's scratch;
+  # every later use (omarchy-theme-color, jq) reads that snapshot.
+  local csnap=$run/$name.colors.toml ssnap=$run/$name.shell.toml
+  snapshot "$path/colors.toml" "$MAX_TOML_BYTES" "$csnap" "$real" && colors=$csnap
+  snapshot "$path/shell.toml" "$MAX_TOML_BYTES" "$ssnap" "$real" && shell=$ssnap
 
-  # Legacy alacritty-only theme: convert into scratch, the way theme-set does.
-  if [[ $colors == /dev/null ]] && safe_file "$path/alacritty.toml" "$MAX_TOML_BYTES"; then
-    tmp=$(mktemp -d)
-    cp -- "$path/alacritty.toml" "$tmp/"
-    omarchy-theme-colors-from-alacritty "$tmp" >/dev/null 2>&1
-    [[ -f $tmp/colors.toml ]] && (( $(stat -c %s "$tmp/colors.toml") <= MAX_TOML_BYTES )) && colors=$tmp/colors.toml
+  # Legacy alacritty-only theme: convert a snapshot in scratch, as theme-set does.
+  if [[ $colors == /dev/null ]]; then
+    local legacy=$run/$name.legacy; mkdir -p "$legacy"
+    if snapshot "$path/alacritty.toml" "$MAX_TOML_BYTES" "$legacy/alacritty.toml" "$real"; then
+      timeout 5s omarchy-theme-colors-from-alacritty "$legacy" >/dev/null 2>&1
+      snapshot "$legacy/colors.toml" "$MAX_TOML_BYTES" "$csnap" && colors=$csnap
+    fi
   fi
 
-  preview=$(list_files "$path" 1 image -iname 'preview.*' "${image_find[@]}")
+  preview=$(list_files "$path" 1 -iname 'preview.*' "${image_find[@]}")
   # Backgrounds: the user's per-theme dir first, then the theme's own, sorted — same order theme-set cycles.
-  local bgs
-  bgs=$( { list_files "$user_bgs/$name" "$MAX_BACKGROUNDS" image "${image_find[@]}"
-           list_files "$path/backgrounds" "$MAX_BACKGROUNDS" image "${image_find[@]}"; } | head -n "$MAX_BACKGROUNDS" )
+  bgs=$( { list_files "$user_bgs/$name" "$MAX_BACKGROUNDS" "${image_find[@]}"
+           list_files "$path/backgrounds" "$MAX_BACKGROUNDS" "${image_find[@]}"; } | head -n "$MAX_BACKGROUNDS" )
   [[ -n $preview ]] || preview=$(head -n1 <<<"$bgs")
+  [[ -n $preview ]] && pkey=$(image_key "$preview")
+  while IFS= read -r b; do [[ -n $b ]] && bgkeys+="$(image_key "$b")"$'\n'; done <<<"$bgs"
 
-  video=$( { list_files "$user_bgs/$name" 1 video "${video_find[@]}"
-             list_files "$path/backgrounds" 1 video "${video_find[@]}"; } | head -n1 )
-  [[ -n $video ]] && ! safe_file "$video" "$MAX_VIDEO_BYTES" && video=""
-  # The video is the theme's intro, not a wallpaper. A still sharing its
-  # basename is its poster frame: recorded as videoStill and excluded from
-  # the selectable backgrounds (stock tooling never globs videos at all).
-  local video_still=""
-  if [[ -n $video ]]; then
-    vstem=${video##*/}; vstem=${vstem%.*}
-    while IFS= read -r b; do
-      [[ -n $b ]] || continue
-      bstem=${b##*/}; bstem=${bstem%.*}
-      [[ $bstem == "$vstem" ]] && { video_still=$b; break; }
-    done <<<"$bgs"
-    [[ -n $video_still ]] && bgs=$(grep -vxF -- "$video_still" <<<"$bgs")
-  fi
-  # One filmstrip thumb per background, keyed by path + stat so a replaced
-  # file gets a new thumb. Cold path only; the record caches the names.
-  local bgthumbs=""
-  while IFS= read -r b; do
-    [[ -n $b ]] || continue
-    bgthumbs+="$thumbs/bg-$(printf '%s\t%s' "$b" "$(stat -c '%s:%Y' -- "$b" 2>/dev/null)" | md5sum | cut -c1-16).jpg"$'\n'
-  done <<<"$bgs"
+  # Palette via omarchy-theme-color, so legacy keys and aliases match what
+  # theme-set produces: under a deadline, and a ceiling that refuses rather
+  # than truncates. Values are shaped to hex colours before they reach QML.
+  pal=$(timeout 5s omarchy-theme-color --file "$colors" --all 2>/dev/null | head -c $((MAX_PALETTE_BYTES + 1)))
+  n=$(printf '%s' "$pal" | wc -c); (( n > MAX_PALETTE_BYTES )) && pal=""
 
-  omarchy-theme-color --file "$colors" --all 2>/dev/null | head -c 65536 | jq -Rs \
-    --arg name "$name" --arg src "$src" --arg path "$path" --arg sig "$s" \
-    --arg preview "$preview" --arg video "$video" --arg videoStill "$video_still" \
-    --arg thumb "$( [[ -n $preview ]] && printf '%s/%s-%s.jpg' "$thumbs" "$name" "$key" )" \
-    --arg bgs "$bgs" --arg bgthumbs "$bgthumbs" \
-    --rawfile colors "$colors" --rawfile shell "$shell" '
-    (split("\n") | map(select(length > 0 and length <= 512) | split("\t") | select(length >= 2) | {(.[0]): .[1]}) | add // {}) as $c
+  jq -n --arg name "$name" --arg src "$src" --arg path "$path" --arg sig "$s" \
+    --arg preview "$preview" --arg previewKey "$pkey" --arg bgs "$bgs" --arg bgkeys "$bgkeys" \
+    --arg pal "$pal" --rawfile colors "$colors" --rawfile shell "$shell" '
+    def hex: if type == "string" and test("^#[0-9a-fA-F]{6}([0-9a-fA-F]{2})?$") then . else null end;
+    ($pal | split("\n") | map(select(length > 0 and length <= 256) | split("\t") | select(length >= 2) | {(.[0]): .[1]}) | add // {}) as $c
     | { name: $name,
         label: ($name | split("-") | map((.[:1] | ascii_upcase) + .[1:]) | join(" ")),
         source: $src, path: $path, signature: $sig,
-        mode: (($c.mode // "dark") | ascii_downcase),
-        colors: ($c | {background, foreground, accent, selection, muted, red, yellow, green, cyan, blue, magenta}),
-        preview: $preview, thumb: $thumb, video: $video, videoStill: $videoStill,
+        mode: (if (($c.mode // "dark") | ascii_downcase) == "light" then "light" else "dark" end),
+        colors: ($c | {background, foreground, accent, selection, muted, red, yellow, green, cyan, blue, magenta} | map_values(hex)),
+        preview: $preview, previewKey: $previewKey,
         backgrounds: ($bgs | split("\n") | map(select(length > 0))),
-        bgThumbs: ($bgthumbs | split("\n") | map(select(length > 0))),
+        bgKeys: ($bgkeys | split("\n") | map(select(length > 0))),
         colorsToml: $colors, shellToml: $shell }'
-  [[ -n $tmp ]] && rm -rf -- "$tmp"
 }
 
 # 1. Walk. User dir first so it wins the name collision in step 3. A theme
-#    entry may be a symlink; its name must be a plain slug (it becomes a
-#    thumb filename and an argument to omarchy-theme-set).
-rows=$(mktemp); fresh=$(mktemp); trap 'rm -f "$rows" "$fresh"' EXIT
+#    entry may be a symlink (that is how themes get developed); its name must
+#    be a plain slug.
 for entry in "user:$user_themes" "stock:$stock_themes"; do
   src=${entry%%:*}; dir=${entry#*:}
   [[ -d $dir ]] || continue
   while IFS= read -r -d '' path; do
     name=${path##*/}
-    [[ $name =~ $NAME_RE && $name != *..* ]] || continue
-    [[ -d $path ]] || continue
+    valid_name "$name" && [[ -d $path ]] || continue
     printf '%s\t%s\t%s\t%s\n' "$name" "$(sig "$path")" "$path" "$src"
-  done < <(find -H "$dir" -mindepth 1 -maxdepth 1 \( -type d -o -type l \) -print0 2>/dev/null | sort -z)
+  done < <(find -H "$dir" -mindepth 1 -maxdepth 1 \( -type d -o -type l \) -print0 2>/dev/null | head -z -n "$MAX_DIR_ENTRIES" | sort -z)
 done | head -n "$MAX_THEMES" >"$rows"
 
-# 2. Resolve only rows with no cached record for (name, signature).
-jq -r --rawfile rows "$rows" '
+# 2. Resolve only rows with no cached record for (name, signature), within
+#    the time budget; whatever is left resolves on a later open.
+partial=false
+while IFS=$'\t' read -r path src; do
+  [[ -n $path ]] || continue
+  if (( SECONDS >= RESOLVE_BUDGET )); then partial=true; break; fi
+  resolve "$path" "$src"
+done < <(jq -r --rawfile rows "$rows" '
   ([.themes[]? | {key: "\(.name)\t\(.signature)", value: true}] | from_entries) as $have
   | $rows | split("\n") | map(select(length > 0) | split("\t")) | unique_by(.[0])
-  | map(select($have["\(.[0])\t\(.[1])"] | not) | "\(.[2])\t\(.[3])") | .[]' <<<"$prev" |
-while IFS=$'\t' read -r path src; do
-  [[ -n $path ]] && resolve "$path" "$src"
-done >"$fresh"
+  | map(select($have["\(.[0])\t\(.[1])"] | not) | "\(.[2])\t\(.[3])") | .[]' <<<"$prev") >"$fresh"
 
-# 3. Merge in walk order, flag shadowed names, add session state, publish atomically.
-current_theme=$(head -c 256 "$state/theme.name" 2>/dev/null | tr -d '\n' || true)
-current_bg=$(readlink -f "$state/background" 2>/dev/null || true)
-jq -n --rawfile rows "$rows" --slurpfile prev <(printf '%s' "$prev") --slurpfile fresh "$fresh" \
+# 3. Merge in walk order, flag shadowed names, add session state. The result
+#    is held in memory, size-checked against the ceiling the readers apply,
+#    then published through an exclusively created sibling and a rename.
+current_theme=$(read_bounded "$state/theme.name" 256 2>/dev/null | tr -d '\n' || true)
+current_bg=$(readlink -f -- "$state/background" 2>/dev/null || true)
+read -r stage_w stage_h < <(stage_size)
+json=$(jq -n --rawfile rows "$rows" --slurpfile prev <(printf '%s' "$prev") --slurpfile fresh "$fresh" \
+      --arg thumbs "$thumbs" --argjson partial "$partial" --argjson stageW "$stage_w" --argjson stageH "$stage_h" \
       --arg currentTheme "$current_theme" --arg currentBackground "$current_bg" '
   (($prev[0].themes + $fresh) | map({key: "\(.name)\t\(.signature)", value: .}) | from_entries) as $rec
   | ($rows | split("\n") | map(select(length > 0) | split("\t"))) as $all
   | ($all | map(.[0]) | group_by(.) | map(select(length > 1) | .[0])) as $dupes
-  | { version: 1,
+  | { version: 2,
+      thumbsDir: $thumbs,
+      stageW: $stageW, stageH: $stageH,
+      partial: $partial,
       currentTheme: $currentTheme,
       currentBackground: $currentBackground,
       themes: ($all | unique_by(.[0])
         | map(. as $r | $rec["\($r[0])\t\($r[1])"] | select(. != null)
-              | . + { shadowsStock: ($dupes | index($r[0]) != null) })) }' \
-  >"$index.$$" && mv -f "$index.$$" "$index"
-cat "$index"
+              | . + { shadowsStock: ($dupes | index($r[0]) != null) })) }')
+n=$(printf '%s' "$json" | wc -c)
+if [[ -z $json ]] || (( n > MAX_INDEX_BYTES )); then
+  jq -n --arg thumbs "$thumbs" --argjson stageW "$stage_w" --argjson stageH "$stage_h" '{version: 2, thumbsDir: $thumbs, stageW: $stageW, stageH: $stageH, partial: false, currentTheme: "", currentBackground: "", themes: [], error: "index exceeds ceiling"}'
+  exit 0
+fi
+if out=$(mktemp "$cache/index.XXXXXXXX"); then
+  printf '%s\n' "$json" >"$out" && mv -f -- "$out" "$index" || rm -f -- "$out"
+fi
+printf '%s\n' "$json"

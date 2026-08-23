@@ -2,11 +2,11 @@
   "schemaVersion": 1,
   "id": "jmckible.swatch",
   "name": "Swatch",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": "Jordan McKible",
   "license": "MIT",
   "homepage": "https://github.com/jmckible/omarchy-swatch",
-  "description": "Theme picker that tries the theme on: full-screen wallpaper and live shell retint as you scrub, video backgrounds when a theme ships one, instant open at any collection size",
+  "description": "Theme picker that tries the theme on: full-screen wallpaper and live shell retint as you scrub, instant open at any collection size",
   "kinds": [
     "overlay"
   ],

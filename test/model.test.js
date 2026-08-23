@@ -10,9 +10,9 @@ new Function("module", "exports", src)(m, m.exports)
 const Model = m.exports
 
 const T = [
-  { name: "tokyo-night", label: "Tokyo Night", mode: "dark", source: "stock", preview: "/p/t.png", backgrounds: ["/b/1.jpg", "/b/2.jpg"], colors: { red: "#1", yellow: "#2", green: "#3", cyan: "#4", blue: "#5", magenta: "#6" } },
+  { name: "tokyo-night", label: "Tokyo Night", mode: "dark", source: "stock", preview: "/p/t.png", previewKey: "aaaaaaaaaaaaaaaa", backgrounds: ["/b/1.jpg", "/b/2.jpg"], bgKeys: ["1111111111111111", "2222222222222222"], colors: { red: "#1", yellow: "#2", green: "#3", cyan: "#4", blue: "#5", magenta: "#6" } },
   { name: "rose-pine", label: "Rose Pine", mode: "light", source: "stock", preview: "", backgrounds: [], colors: {} },
-  { name: "last-call", label: "Last Call", mode: "dark", source: "user", preview: "/p/l.png", backgrounds: [], colors: {} },
+  { name: "last-call", label: "Last Call", mode: "dark", source: "user", preview: "/p/l.png", previewKey: "cccccccccccccccc", backgrounds: [], colors: {} },
 ]
 
 assert.deepEqual(Model.filter(T, "", "all").map((t) => t.name), ["tokyo-night", "rose-pine", "last-call"])
@@ -48,9 +48,16 @@ assert.deepEqual(Model.ansi(T[0]), ["#1", "#2", "#3", "#4", "#5", "#6"])
 assert.equal(Model.ansi(T[1]).length, 6)
 
 
-const TV = { name: "solitude-video", video: "/b/90-storm.mp4", videoStill: "/b/90-storm.png", backgrounds: ["/b/BG1.png", "/b/90-storm.png"] }
-assert.equal(Model.defaultBgIndex(TV), 1)
-assert.equal(Model.defaultBgIndex(T[0]), 0)
-assert.equal(Model.defaultBgIndex(null), 0)
+assert.equal(Model.keyAt(T[0], 1), "2222222222222222")
+assert.equal(Model.keyAt(T[0], 9), "2222222222222222")
+assert.equal(Model.keyAt(T[2], 0), "cccccccccccccccc")   // no backgrounds: the preview's key
+assert.equal(Model.keyAt(T[1], 0), "")
+assert.equal(Model.keyAt(null, 0), "")
+
+assert.equal(Model.thumbPath("/c", "1111111111111111"), "/c/bg-1111111111111111.jpg")
+assert.equal(Model.thumbPath("", "1111111111111111"), "")
+assert.equal(Model.stagePath("/c", "1111111111111111", 2560, 1440), "/c/stage-1111111111111111-2560x1440.jpg")
+assert.equal(Model.stagePath("/c", "", 2560, 1440), "")
+assert.equal(Model.stagePath("/c", "1111111111111111", 0, 1440), "")
 
 console.log("ok")

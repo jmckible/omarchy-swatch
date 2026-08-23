@@ -47,7 +47,9 @@ function wrap(i, n) {
   return ((i % n) + n) % n
 }
 
-// Background shown for a theme at bgIndex; falls back to the preview image.
+// Background path for a theme at bgIndex; falls back to the preview image.
+// This is the theme's file — used to match the current background and to
+// hand to omarchy-theme-bg-set, never to load pixels from.
 function backgroundAt(theme, bgIndex) {
   if (!theme) return ""
   var bgs = theme.backgrounds || []
@@ -55,13 +57,17 @@ function backgroundAt(theme, bgIndex) {
   return bgs[clamp(bgIndex, bgs.length)]
 }
 
-// Where selection lands within a theme's backgrounds: on the video's paired
-// still when there is one, so the clip settles into what stays on screen.
-function defaultBgIndex(theme) {
-  if (!theme || !theme.video || !theme.videoStill) return 0
-  var i = (theme.backgrounds || []).indexOf(theme.videoStill)
-  return i === -1 ? 0 : i
+// Cache key of that same image. Every pixel the overlay shows comes from a
+// derivative thumbs.sh produced under this key.
+function keyAt(theme, bgIndex) {
+  if (!theme) return ""
+  var keys = theme.bgKeys || []
+  if (keys.length === 0) return theme.previewKey || ""
+  return keys[clamp(bgIndex, keys.length)] || ""
 }
+
+function thumbPath(dir, key) { return dir && key ? dir + "/bg-" + key + ".jpg" : "" }
+function stagePath(dir, key, w, h) { return dir && key && w > 0 && h > 0 ? dir + "/stage-" + key + "-" + w + "x" + h + ".jpg" : "" }
 
 function ansi(theme) {
   var c = theme && theme.colors ? theme.colors : {}
@@ -69,5 +75,5 @@ function ansi(theme) {
 }
 
 if (typeof module !== "undefined") {
-  module.exports = { matches: matches, filter: filter, nextMode: nextMode, indexOf: indexOf, findByName: findByName, clamp: clamp, wrap: wrap, backgroundAt: backgroundAt, defaultBgIndex: defaultBgIndex, ansi: ansi, MODES: MODES }
+  module.exports = { matches: matches, filter: filter, nextMode: nextMode, indexOf: indexOf, findByName: findByName, clamp: clamp, wrap: wrap, backgroundAt: backgroundAt, keyAt: keyAt, thumbPath: thumbPath, stagePath: stagePath, ansi: ansi, MODES: MODES }
 }

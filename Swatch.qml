@@ -1,5 +1,4 @@
 import QtQuick
-import QtMultimedia
 import Quickshell
 import Quickshell.Io
 import Quickshell.Wayland
@@ -30,13 +29,15 @@ Item {
   property int bgIndex: 0
   property string currentTheme: ""
   property string currentBackground: ""
-  property string selectionFile: ""
-  property string doneFile: ""
+  property string pickDir: ""
+  property string thumbsDir: ""
+  property int cacheGen: 0    // ticks while thumbs.sh lands derivatives; failed loads retry on it
   property bool applying: false
   property bool livePreview: true
 
   readonly property var selected: (selectedIndex >= 0 && selectedIndex < rows.length) ? rows[selectedIndex] : null
   readonly property string selectedBackground: Model.backgroundAt(selected, bgIndex)
+  readonly property string selectedKey: Model.keyAt(selected, bgIndex)
   readonly property var ansi: Model.ansi(selected)
   readonly property color bg: selected ? selected.colors.background || "#101315" : "#101315"
   readonly property color fg: selected ? selected.colors.foreground || "#cacccc" : "#cacccc"
@@ -45,20 +46,41 @@ Item {
   // Wallpaper slots: the selected background plus its neighbours stay
   // decoded in fixed Image items (the pixmap cache won't hold screen-size
   // images for us), so scrubbing never waits on a decode it already did.
+  // Slots hold cache keys; what they show is the stage copy thumbs.sh made.
   readonly property int slotCount: 5
   property var slots: ["", "", "", "", ""]
   property var slotAge: [0, 0, 0, 0, 0]
   property int tick: 0
-  property string shownBackground: ""
+  property string shownKey: ""
+
+  // Metrics are frozen per open. A candidate's shell.toml may carry a spacing
+  // scale or font sizes; the live preview applies them and the shell around
+  // the picker re-lays out — that is the honest preview of apply — but the
+  // picker's own geometry must not jump under the cursor while scrubbing.
+  // Colours and the font family stay live, so it still looks like the theme.
+  property real metricScale: 1
+  property var fz: ({ caption: 10, body: 12, subtitle: 13, title: 14, heading: 16 })
+  function freezeMetrics() {
+    var m = Number(Style.effectiveSpacingScale)
+    metricScale = m > 0 ? m : 1
+    fz = { caption: root.fz.caption, body: root.fz.body, subtitle: root.fz.subtitle, title: root.fz.title, heading: root.fz.heading }
+  }
+  function sp(px) { var n = px * metricScale; return n <= 0 ? 0 : Math.max(1, Math.round(n)) }
 
   // Reading content scales with the screen above a 1440-wide baseline, so a
   // 13" laptop keeps Style's sizes and a 4K desk doesn't get 13 px samples.
   readonly property real k: panel.width > 0 ? Math.max(1, Math.min(1.8, panel.width / 1440)) : 1
-  readonly property int metaPx: Math.round(Style.font.body * k)
-  readonly property int samplePx: Math.round(Style.font.subtitle * k)
+  readonly property int metaPx: Math.round(root.fz.body * k)
+  readonly property int samplePx: Math.round(root.fz.subtitle * k)
 
   readonly property string barPosition: shell && shell.bar && shell.bar.position ? shell.bar.position : "top"
   readonly property int barSize: shell && shell.bar && shell.bar.barSize ? shell.bar.barSize : 0
+
+  // Stage copies are made at the largest monitor's physical size, measured by
+  // index.sh. The shell never decodes a theme's own file; everything it shows
+  // is a derivative from our cache.
+  property int stageW: 2560
+  property int stageH: 1440
 
   function scriptPath(name) { return Qt.resolvedUrl(name).toString().replace(/^file:\/\//, "") }
 
@@ -67,10 +89,9 @@ Item {
   function open(payloadJson) {
     var args = {}
     try { args = JSON.parse(payloadJson || "{}") || {} } catch (e) { args = {} }
-    selectionFile = String(args.selectionFile || "")
-    doneFile = String(args.doneFile || "")
+    pickDir = String(args.dir || "")
     applying = false
-    videoTheme = ""   // reopening on the same theme replays its intro
+    freezeMetrics()
     filterText = ""
     modeFilter = "all"
     opened = true
@@ -80,8 +101,7 @@ Item {
 
   function close() {
     if (!applying && livePreview) revertPreview()
-    if (doneFile && !applying) finishDoneFile()
-    player.stop()
+    if (pickDir && !applying) finishPick("")
     opened = false
   }
 
@@ -92,6 +112,8 @@ Item {
 
   // ---------------------------------------------------------------- index
 
+  // index.sh bounds its own output (8 MB, refused rather than truncated), so
+  // this collector never holds more than that.
   Process {
     id: indexProc
     command: [root.scriptPath("index.sh")]
@@ -101,8 +123,10 @@ Item {
   Process {
     id: thumbsProc
     command: [root.scriptPath("thumbs.sh")]
-    onExited: root.refreshRows()
+    onExited: root.cacheGen += 1
   }
+  // Derivatives land while thumbs.sh runs; tick so images that were missing retry.
+  Timer { running: thumbsProc.running; interval: 2000; repeat: true; onTriggered: root.cacheGen += 1 }
 
   function loadIndex(raw) {
     if (!raw) return
@@ -110,6 +134,9 @@ Item {
     try { parsed = JSON.parse(raw) } catch (e) { console.warn("swatch: index parse failed:", e); return }
     var changed = raw !== loadedIndex
     loadedIndex = raw
+    thumbsDir = String(parsed.thumbsDir || "")
+    var w = Number(parsed.stageW), h = Number(parsed.stageH)
+    if (w >= 320 && w <= 7680 && h >= 200 && h <= 4320) { stageW = Math.round(w); stageH = Math.round(h) }
     currentTheme = parsed.currentTheme || ""
     currentBackground = parsed.currentBackground || ""
     if (changed) themes = parsed.themes || []
@@ -136,11 +163,6 @@ Item {
     Qt.callLater(function() { if (selectedIndex >= 0) strip.positionViewAtIndex(selectedIndex, ListView.Center) })
   }
 
-  function refreshRows() {
-    var copy = rows.slice()
-    rows = copy   // new array → delegates re-bind and retry thumbs that just landed
-  }
-
   // ---------------------------------------------------------------- navigation
 
   function setFilter(text) { filterText = text; rebuild(false) }
@@ -152,7 +174,7 @@ Item {
     var next = wrap ? Model.wrap(selectedIndex + delta, rows.length) : Model.clamp(selectedIndex + delta, rows.length)
     if (next === selectedIndex) return
     selectedIndex = next
-    bgIndex = Model.defaultBgIndex(rows[next])
+    bgIndex = 0
   }
 
   function jumpTo(index) {
@@ -160,7 +182,7 @@ Item {
     var next = Model.clamp(index, rows.length)
     if (next === selectedIndex) return
     selectedIndex = next
-    bgIndex = Model.defaultBgIndex(rows[next])
+    bgIndex = 0
   }
 
   function moveBackground(delta) {
@@ -177,13 +199,13 @@ Item {
 
   // ---------------------------------------------------------------- wallpaper
 
-  onSelectedBackgroundChanged: if (opened) stageBackground()
+  onSelectedKeyChanged: if (opened) stageBackground()
 
   function stageBackground() {
-    var want = [selectedBackground]
+    var want = [selectedKey]
     for (var d = 1; d <= 2; d++) {
-      if (rows[selectedIndex + d]) want.push(Model.backgroundAt(rows[selectedIndex + d], 0))
-      if (rows[selectedIndex - d]) want.push(Model.backgroundAt(rows[selectedIndex - d], 0))
+      if (rows[selectedIndex + d]) want.push(Model.keyAt(rows[selectedIndex + d], 0))
+      if (rows[selectedIndex - d]) want.push(Model.keyAt(rows[selectedIndex - d], 0))
     }
     var s = slots.slice(), age = slotAge.slice()
     tick += 1
@@ -206,33 +228,12 @@ Item {
     }
     slots = s
     slotAge = age
-    var slot = slots.indexOf(selectedBackground)
+    var slot = slots.indexOf(selectedKey)
     var item = slot === -1 ? null : wallpapers.itemAt(slot)
-    if (item && item.status === Image.Ready) shownBackground = selectedBackground
-    stageVideo()
+    if (item && item.ready) shownKey = selectedKey
   }
 
-  // The clip is the theme's intro: it plays once when you arrive on the
-  // theme, over the background that is actually selected, then the fade
-  // reveals that background. Scrubbing backgrounds stops it; leaving the
-  // theme and coming back replays it from frame 0.
-  property string videoTheme: ""
-  function stageVideo() {
-    var t = selected
-    if (!t || !t.video) {
-      videoTheme = ""
-      player.stop()
-      player.source = ""
-      return
-    }
-    if (t.name === videoTheme) return   // same theme: a background scrub, not an arrival
-    videoTheme = t.name
-    player.stop()
-    player.source = Util.fileUrl(t.video)
-    player.play()
-  }
-
-  onBgIndexChanged: if (opened && selected && selected.name === videoTheme && player.playbackState === MediaPlayer.PlayingState) player.stop()
+  function slotReady(key) { if (key && key === selectedKey) shownKey = key }
 
   // ---------------------------------------------------------------- preview
 
@@ -263,40 +264,41 @@ Item {
     var t = selected
     if (!t) return
     applying = true
-    if (selectionFile) {
-      Quickshell.execDetached(["bash", "-c",
-        "printf '%s\\n' " + Util.shellQuote(t.name) + " > " + Util.shellQuote(selectionFile)
-        + "; : > " + Util.shellQuote(doneFile)])
-      selectionFile = ""; doneFile = ""
+    if (pickDir) {
+      finishPick(t.name)
     } else {
-      var cmd = Util.shellQuote(omarchyPath + "/bin/omarchy-theme-set") + " " + Util.shellQuote(t.name)
+      // argv only, through apply.sh — nothing is composed into a shell string.
+      var args = [scriptPath("apply.sh"), t.name]
       var bg = selectedBackground
-      if (bg && t.backgrounds && t.backgrounds.length > 1 && bg !== Model.backgroundAt(t, 0))
-        cmd += " && " + Util.shellQuote(omarchyPath + "/bin/omarchy-theme-bg-set") + " " + Util.shellQuote(bg)
-      Quickshell.execDetached(["bash", "-c", cmd])
+      if (bg && t.backgrounds && t.backgrounds.length > 1 && bg !== Model.backgroundAt(t, 0)) args.push(bg)
+      Quickshell.execDetached(args)
     }
     dismiss()
   }
 
-  function finishDoneFile() {
-    if (!doneFile) return
-    Quickshell.execDetached(["bash", "-c", ": > " + Util.shellQuote(doneFile)])
-    selectionFile = ""; doneFile = ""
+  // Answer pick.sh: the selection (empty on cancel) and the done marker.
+  function finishPick(name) {
+    if (!pickDir) return
+    Quickshell.execDetached([scriptPath("apply.sh"), "--pick", pickDir, name])
+    pickDir = ""
   }
 
-  // ---------------------------------------------------------------- video
+  // ---------------------------------------------------------------- images
 
-  MediaPlayer {
-    id: player
-    videoOutput: video   // plays once; EndOfMedia stops it and the fade reveals the still
+  // Every image the overlay shows is a derivative in our cache. One that is
+  // not there yet fails to load and is retried on the next cache tick; a load
+  // that succeeded is never disturbed. Declarative, so the source binding
+  // survives the retry.
+  component CacheImage: Image {
+    property string path: ""
+    property int failedAt: -1
+    source: path && failedAt !== root.cacheGen ? Util.fileUrl(path) : ""
+    fillMode: Image.PreserveAspectCrop
+    asynchronous: true
+    smooth: true
+    onPathChanged: failedAt = -1
+    onStatusChanged: if (status === Image.Error) failedAt = root.cacheGen
   }
-
-  // The handoff starts before the clip ends, so motion is still alive while
-  // the background comes through; the background then settles from a slight
-  // zoom. Both are content-agnostic.
-  readonly property bool introEnding: player.playbackState === MediaPlayer.PlayingState
-    && player.duration > 0 && player.position >= player.duration - 600
-  onIntroEndingChanged: if (introEnding) settleAnim.restart()
 
   // ---------------------------------------------------------------- window
 
@@ -328,40 +330,36 @@ Item {
       Item {
         id: wallpaperLayer
         anchors.fill: parent
-        NumberAnimation {
-          id: settleAnim
-          target: wallpaperLayer
-          property: "scale"
-          from: 1.025; to: 1.0
-          duration: 1400
-          easing.type: Easing.OutCubic
-        }
 
-      Repeater {
-        id: wallpapers
-        model: root.slotCount
-        Image {
-          required property int index
-          anchors.fill: parent
-          source: root.slots[index] ? Util.fileUrl(root.slots[index]) : ""
-          fillMode: Image.PreserveAspectCrop
-          asynchronous: true
-          cache: false
-          smooth: true
-          sourceSize: Qt.size(Math.round(stage.width * panel.dpr), Math.round(stage.height * panel.dpr))
-          opacity: root.slots[index] && root.slots[index] === root.shownBackground ? 1 : 0
-          Behavior on opacity { NumberAnimation { duration: 160; easing.type: Easing.InOutQuad } }
-          onStatusChanged: if (status === Image.Ready && root.slots[index] === root.selectedBackground) root.shownBackground = root.selectedBackground
+        Repeater {
+          id: wallpapers
+          model: root.slotCount
+          Item {
+            id: slotItem
+            required property int index
+            readonly property string key: root.slots[index]
+            readonly property bool ready: stageImg.status === Image.Ready || softImg.status === Image.Ready
+            anchors.fill: parent
+            opacity: key && key === root.shownKey ? 1 : 0
+            Behavior on opacity { NumberAnimation { duration: 160; easing.type: Easing.InOutQuad } }
+            onReadyChanged: if (ready) root.slotReady(key)
+            // The filmstrip thumb stands in, soft, until the stage copy exists.
+            CacheImage {
+              id: softImg
+              anchors.fill: parent
+              path: Model.thumbPath(root.thumbsDir, slotItem.key)
+              sourceSize: Qt.size(640, 360)
+              visible: stageImg.status !== Image.Ready
+            }
+            CacheImage {
+              id: stageImg
+              anchors.fill: parent
+              path: Model.stagePath(root.thumbsDir, slotItem.key, root.stageW, root.stageH)
+              sourceSize: Qt.size(root.stageW, root.stageH)
+              cache: false
+            }
+          }
         }
-      }
-      }
-
-      VideoOutput {
-        id: video
-        anchors.fill: parent
-        fillMode: VideoOutput.PreserveAspectCrop
-        opacity: player.playbackState === MediaPlayer.PlayingState && !root.introEnding ? 1 : 0
-        Behavior on opacity { NumberAnimation { duration: root.introEnding ? 900 : 350; easing.type: Easing.InOutQuad } }
       }
 
       // Scrims: a light lid at the top for the title, a heavier one at the
@@ -414,34 +412,34 @@ Item {
 
       // ---- title block
       Column {
-        anchors { left: parent.left; top: parent.top; leftMargin: Style.space(56); topMargin: Style.space(52) }
-        spacing: Style.space(12)
+        anchors { left: parent.left; top: parent.top; leftMargin: root.sp(56); topMargin: root.sp(52) }
+        spacing: root.sp(12)
         visible: !!root.selected
 
         Text {
           text: root.selected ? root.selected.name : ""
+          textFormat: Text.PlainText
           color: root.selected && root.selected.mode === "light" ? root.fg : "#ffffff"
           font.family: Style.fontFamily
-          font.pixelSize: Math.round(Style.space(44) * Math.sqrt(root.k))
+          font.pixelSize: Math.round(root.sp(44) * Math.sqrt(root.k))
           font.weight: Font.Bold
           font.letterSpacing: -1
           style: Text.Raised
           styleColor: Util.alpha(root.bg, 0.6)
         }
         Row {
-          spacing: Style.space(10)
+          spacing: root.sp(10)
           Text { text: root.selected ? (root.selected.mode === "light" ? "light" : "dark") : ""; color: root.fg; font.family: Style.fontFamily; font.pixelSize: root.metaPx }
           Text { text: "·"; color: root.fg; opacity: 0.45; font.family: Style.fontFamily; font.pixelSize: root.metaPx }
           Text { text: root.selected ? (root.selected.source === "user" ? "installed" : "stock") + (root.selected.shadowsStock ? " (shadows stock)" : "") : ""; color: root.fg; font.family: Style.fontFamily; font.pixelSize: root.metaPx }
           Text { text: "·"; color: root.fg; opacity: 0.45; font.family: Style.fontFamily; font.pixelSize: root.metaPx }
           Text { text: root.selected ? root.selected.backgrounds.length + " background" + (root.selected.backgrounds.length === 1 ? "" : "s") : ""; color: root.fg; font.family: Style.fontFamily; font.pixelSize: root.metaPx }
-          Text { visible: !!(root.selected && root.selected.video); text: player.playbackState === MediaPlayer.PlayingState ? "· video ▶" : "· video"; color: root.accent; font.family: Style.fontFamily; font.pixelSize: root.metaPx }
           Text { visible: root.selected && root.selected.name === root.currentTheme; text: "· current"; color: root.fg; opacity: 0.7; font.family: Style.fontFamily; font.pixelSize: root.metaPx }
         }
         Row {
           Repeater {
             model: root.ansi
-            Rectangle { required property var modelData; width: Math.round(Style.space(38) * Math.sqrt(root.k)); height: Math.round(Style.space(10) * Math.sqrt(root.k)); color: modelData }
+            Rectangle { required property var modelData; width: Math.round(root.sp(38) * Math.sqrt(root.k)); height: Math.round(root.sp(10) * Math.sqrt(root.k)); color: modelData }
           }
         }
         // Backgrounds: a vertical filmstrip under its own playhead, same
@@ -450,7 +448,7 @@ Item {
         Item {
           id: bgArea
           visible: !!(root.selected && root.selected.backgrounds.length > 1)
-          width: root.bgThumbW + Style.space(120)
+          width: root.bgThumbW + root.sp(120)
           height: root.bgStripH
 
           ListView {
@@ -459,7 +457,7 @@ Item {
             height: parent.height
             orientation: ListView.Vertical
             model: root.selected ? root.selected.backgrounds : []
-            spacing: Style.space(8)
+            spacing: root.sp(8)
             clip: true
             currentIndex: root.bgIndex
             highlightRangeMode: ListView.StrictlyEnforceRange
@@ -476,7 +474,7 @@ Item {
               required property int index
               required property var modelData
               readonly property bool sel: index === root.bgIndex
-              readonly property string thumb: root.selected && root.selected.bgThumbs && root.selected.bgThumbs[index] ? root.selected.bgThumbs[index] : ""
+              readonly property string key: root.selected && root.selected.bgKeys ? (root.selected.bgKeys[index] || "") : ""
               width: root.bgThumbW
               height: root.bgThumbH
 
@@ -488,11 +486,9 @@ Item {
                 Behavior on opacity { NumberAnimation { duration: 120 } }
                 Behavior on scale { NumberAnimation { duration: 120 } }
                 clip: true
-                Image {
+                CacheImage {
                   anchors.fill: parent
-                  source: bgCell.thumb ? Util.fileUrl(bgCell.thumb) : ""
-                  fillMode: Image.PreserveAspectCrop
-                  asynchronous: true
+                  path: Model.thumbPath(root.thumbsDir, bgCell.key)
                   cache: true
                   sourceSize: Qt.size(Math.round(width * panel.dpr), Math.round(height * panel.dpr))
                   visible: status === Image.Ready
@@ -500,7 +496,7 @@ Item {
                 Rectangle {
                   anchors.fill: parent
                   color: "transparent"
-                  border.width: bgCell.sel ? Style.space(2) : 1
+                  border.width: bgCell.sel ? root.sp(2) : 1
                   border.color: bgCell.sel ? root.accent : Util.alpha(root.fg, 0.22)
                 }
               }
@@ -513,18 +509,18 @@ Item {
           }
 
           // Edge fades, playhead, and the count.
-          Rectangle { anchors { top: parent.top; left: parent.left } width: root.bgThumbW; height: Style.space(40)
+          Rectangle { anchors { top: parent.top; left: parent.left } width: root.bgThumbW; height: root.sp(40)
             gradient: Gradient { GradientStop { position: 0; color: Util.alpha(root.bg, 0.75) } GradientStop { position: 1; color: Util.alpha(root.bg, 0) } } }
-          Rectangle { anchors { bottom: parent.bottom; left: parent.left } width: root.bgThumbW; height: Style.space(40)
+          Rectangle { anchors { bottom: parent.bottom; left: parent.left } width: root.bgThumbW; height: root.sp(40)
             gradient: Gradient { GradientStop { position: 0; color: Util.alpha(root.bg, 0) } GradientStop { position: 1; color: Util.alpha(root.bg, 0.75) } } }
-          Rectangle { x: -Style.space(10); anchors.verticalCenter: parent.verticalCenter; width: Style.space(2); height: root.bgThumbH + Style.space(8); color: root.fg; opacity: 0.9 }
+          Rectangle { x: -root.sp(10); anchors.verticalCenter: parent.verticalCenter; width: root.sp(2); height: root.bgThumbH + root.sp(8); color: root.fg; opacity: 0.9 }
 
           Column {
-            anchors { left: bgStrip.right; leftMargin: Style.space(14); verticalCenter: parent.verticalCenter }
-            spacing: Style.space(4)
-            Text { text: root.selected ? (root.bgIndex + 1) + " / " + root.selected.backgrounds.length : ""; color: root.fg; font.family: Style.fontFamily; font.pixelSize: Style.font.title; font.weight: Font.DemiBold }
-            Text { text: "backgrounds"; color: root.fg; opacity: 0.7; font.family: Style.fontFamily; font.pixelSize: Style.font.caption }
-            Text { text: "↑ ↓"; color: root.fg; opacity: 0.5; font.family: Style.fontFamily; font.pixelSize: Style.font.caption }
+            anchors { left: bgStrip.right; leftMargin: root.sp(14); verticalCenter: parent.verticalCenter }
+            spacing: root.sp(4)
+            Text { text: root.selected ? (root.bgIndex + 1) + " / " + root.selected.backgrounds.length : ""; color: root.fg; font.family: Style.fontFamily; font.pixelSize: root.fz.title; font.weight: Font.DemiBold }
+            Text { text: "backgrounds"; color: root.fg; opacity: 0.7; font.family: Style.fontFamily; font.pixelSize: root.fz.caption }
+            Text { text: "↑ ↓"; color: root.fg; opacity: 0.5; font.family: Style.fontFamily; font.pixelSize: root.fz.caption }
           }
 
           MouseArea {
@@ -537,13 +533,13 @@ Item {
 
       // ---- samples: the palette doing its actual job
       Column {
-        anchors { right: parent.right; top: parent.top; rightMargin: Style.space(56); topMargin: Style.space(52) }
-        spacing: Style.space(14)
+        anchors { right: parent.right; top: parent.top; rightMargin: root.sp(56); topMargin: root.sp(52) }
+        spacing: root.sp(14)
         visible: !!root.selected
 
       Rectangle {
-        width: Math.round(Style.space(500) * root.k)
-        height: sample.implicitHeight + Style.space(28)
+        width: Math.round(root.sp(500) * root.k)
+        height: sample.implicitHeight + root.sp(28)
         color: Util.alpha(root.bg, 0.88)
         border.width: 1
         border.color: root.accent
@@ -551,8 +547,8 @@ Item {
 
         Column {
           id: sample
-          anchors { left: parent.left; right: parent.right; top: parent.top; margins: Style.space(14) }
-          spacing: Style.space(4)
+          anchors { left: parent.left; right: parent.right; top: parent.top; margins: root.sp(14) }
+          spacing: root.sp(4)
           readonly property int px: root.samplePx
           readonly property string ff: Style.fontFamily
           Text { textFormat: Text.RichText; font.family: sample.ff; font.pixelSize: sample.px; color: root.fg
@@ -567,24 +563,24 @@ Item {
             text: '<span style="color:' + root.ansi[1] + '">&nbsp;M</span> shell/plugins/swatch/Swatch.qml' }
           Text { textFormat: Text.RichText; font.family: sample.ff; font.pixelSize: sample.px; color: root.fg
             text: '<span style="color:' + root.ansi[0] + '">??</span> index.sh <span style="color:' + root.ansi[3] + '">→</span> <span style="color:' + root.ansi[5] + '">thumbs.sh</span>' }
-          Row { spacing: Style.space(6)
+          Row { spacing: root.sp(6)
             Text { text: "❯"; color: root.accent; font.family: sample.ff; font.pixelSize: sample.px }
-            Rectangle { width: Style.space(8); height: sample.px + 2; color: root.accent; anchors.verticalCenter: parent.verticalCenter } }
+            Rectangle { width: root.sp(8); height: sample.px + 2; color: root.accent; anchors.verticalCenter: parent.verticalCenter } }
         }
       }
 
       // A small Rails model, in homage to where Omarchy comes from.
       Rectangle {
-        width: Math.round(Style.space(500) * root.k)
-        height: code.implicitHeight + Style.space(28)
+        width: Math.round(root.sp(500) * root.k)
+        height: code.implicitHeight + root.sp(28)
         color: Util.alpha(root.bg, 0.88)
         border.width: 1
         border.color: Util.alpha(root.fg, 0.35)
 
         Column {
           id: code
-          anchors { left: parent.left; right: parent.right; top: parent.top; margins: Style.space(14) }
-          spacing: Style.space(4)
+          anchors { left: parent.left; right: parent.right; top: parent.top; margins: root.sp(14) }
+          spacing: root.sp(4)
           readonly property int px: root.samplePx
           readonly property string ff: Style.fontFamily
           readonly property string kw: root.accent
@@ -624,20 +620,20 @@ Item {
 
       // ---- mode chips (Tab cycles, click selects) and the typed filter
       Column {
-        anchors { horizontalCenter: parent.horizontalCenter; top: parent.top; topMargin: Style.space(52) }
-        spacing: Style.space(10)
+        anchors { horizontalCenter: parent.horizontalCenter; top: parent.top; topMargin: root.sp(52) }
+        spacing: root.sp(10)
 
         Row {
           anchors.horizontalCenter: parent.horizontalCenter
-          spacing: Style.space(6)
+          spacing: root.sp(6)
           Repeater {
             model: Model.MODES
             Rectangle {
               id: chip
               required property string modelData
               readonly property bool on: modelData === root.modeFilter
-              height: Style.space(24)
-              width: chipLabel.implicitWidth + Style.space(20)
+              height: root.sp(24)
+              width: chipLabel.implicitWidth + root.sp(20)
               color: on ? Util.alpha(root.fg, 0.92) : Util.alpha(root.bg, 0.55)
               border.width: 1
               border.color: on ? root.fg : Util.alpha(root.fg, 0.35)
@@ -647,7 +643,7 @@ Item {
                 text: chip.modelData.charAt(0).toUpperCase() + chip.modelData.slice(1)
                 color: chip.on ? root.bg : root.fg
                 font.family: Style.fontFamily
-                font.pixelSize: Style.font.caption
+                font.pixelSize: root.fz.caption
                 font.weight: chip.on ? Font.DemiBold : Font.Normal
               }
               MouseArea { anchors.fill: parent; onClicked: { root.modeFilter = chip.modelData; root.rebuild(false) } }
@@ -661,7 +657,7 @@ Item {
           text: root.filterText + "▍"
           color: root.fg
           font.family: Style.fontFamily
-          font.pixelSize: Style.font.heading
+          font.pixelSize: root.fz.heading
           style: Text.Outline
           styleColor: Util.alpha(root.bg, 0.7)
         }
@@ -670,8 +666,8 @@ Item {
       // ---- filmstrip under a fixed playhead
       Item {
         id: stripArea
-        anchors { left: parent.left; right: parent.right; bottom: parent.bottom; bottomMargin: Style.space(44) }
-        height: root.thumbH + Style.space(24)
+        anchors { left: parent.left; right: parent.right; bottom: parent.bottom; bottomMargin: root.sp(44) }
+        height: root.thumbH + root.sp(24)
 
         readonly property int thumbW: root.thumbW
         readonly property int thumbH: root.thumbH
@@ -679,10 +675,10 @@ Item {
         ListView {
           id: strip
           anchors.fill: parent
-          anchors.topMargin: Style.space(12)
+          anchors.topMargin: root.sp(12)
           orientation: ListView.Horizontal
           model: root.rows
-          spacing: Style.space(12)
+          spacing: root.sp(12)
           clip: true
           currentIndex: root.selectedIndex
           highlightRangeMode: ListView.StrictlyEnforceRange
@@ -693,7 +689,7 @@ Item {
           cacheBuffer: stripArea.thumbW * 12
           reuseItems: true
           boundsBehavior: Flickable.StopAtBounds
-          onCurrentIndexChanged: if (currentIndex !== root.selectedIndex && currentIndex >= 0) { root.selectedIndex = currentIndex; root.bgIndex = Model.defaultBgIndex(root.rows[currentIndex]) }
+          onCurrentIndexChanged: if (currentIndex !== root.selectedIndex && currentIndex >= 0) { root.selectedIndex = currentIndex; root.bgIndex = 0 }
 
           delegate: Item {
             id: cell
@@ -714,63 +710,55 @@ Item {
 
               // Painted card: instant, zero I/O. The thumb lands on top.
               Column {
-                anchors { left: parent.left; top: parent.top; margins: Style.space(10) }
-                spacing: Style.space(5)
-                Rectangle { width: cell.width * 0.55; height: Style.space(5); color: cell.modelData.colors.accent || "#888" }
-                Rectangle { width: cell.width * 0.8; height: Style.space(5); color: cell.modelData.colors.foreground || "#ccc"; opacity: 0.8 }
-                Rectangle { width: cell.width * 0.4; height: Style.space(5); color: cell.modelData.colors.green || "#8c8" }
+                anchors { left: parent.left; top: parent.top; margins: root.sp(10) }
+                spacing: root.sp(5)
+                Rectangle { width: cell.width * 0.55; height: root.sp(5); color: cell.modelData.colors.accent || "#888" }
+                Rectangle { width: cell.width * 0.8; height: root.sp(5); color: cell.modelData.colors.foreground || "#ccc"; opacity: 0.8 }
+                Rectangle { width: cell.width * 0.4; height: root.sp(5); color: cell.modelData.colors.green || "#8c8" }
               }
-              Image {
+              CacheImage {
                 anchors.fill: parent
-                source: cell.modelData.thumb ? Util.fileUrl(cell.modelData.thumb) : ""
-                fillMode: Image.PreserveAspectCrop
-                asynchronous: true
+                path: Model.thumbPath(root.thumbsDir, cell.modelData.previewKey)
                 cache: true
                 sourceSize: Qt.size(Math.round(width * panel.dpr), Math.round(height * panel.dpr))
                 visible: status === Image.Ready
               }
               Row {
                 anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
-                height: Style.space(4)
-                Repeater { model: Model.ansi(cell.modelData); Rectangle { required property var modelData; width: cell.width / 6; height: Style.space(4); color: modelData } }
+                height: root.sp(4)
+                Repeater { model: Model.ansi(cell.modelData); Rectangle { required property var modelData; width: cell.width / 6; height: root.sp(4); color: modelData } }
               }
               Text {
-                anchors { left: parent.left; bottom: parent.bottom; leftMargin: Style.space(8); bottomMargin: Style.space(9) }
+                anchors { left: parent.left; bottom: parent.bottom; leftMargin: root.sp(8); bottomMargin: root.sp(9) }
                 text: cell.modelData.name
+                textFormat: Text.PlainText
                 color: cell.modelData.colors.foreground || "#fff"
                 font.family: Style.fontFamily
-                font.pixelSize: Style.font.caption
+                font.pixelSize: root.fz.caption
                 style: Text.Outline
                 styleColor: Util.alpha(cell.modelData.colors.background || "#000", 0.9)
               }
               Rectangle {
-                visible: !!cell.modelData.video
-                anchors { right: parent.right; top: parent.top; margins: Style.space(6) }
-                width: Style.space(16); height: Style.space(16)
-                color: Util.alpha(cell.modelData.colors.background || "#000", 0.7)
-                Text { anchors.centerIn: parent; text: "▶"; color: cell.modelData.colors.foreground || "#fff"; font.pixelSize: Style.space(8) }
-              }
-              Rectangle {
                 anchors.fill: parent
                 color: "transparent"
-                border.width: cell.selected ? Style.space(2) : 1
+                border.width: cell.selected ? root.sp(2) : 1
                 border.color: cell.selected ? root.accent : Util.alpha(cell.modelData.colors.foreground || "#fff", 0.18)
               }
             }
             MouseArea {
               anchors.fill: parent
-              onClicked: { root.selectedIndex = cell.index; root.bgIndex = Model.defaultBgIndex(cell.modelData) }
+              onClicked: { root.selectedIndex = cell.index; root.bgIndex = 0 }
               onDoubleClicked: { root.selectedIndex = cell.index; root.apply() }
             }
           }
         }
 
         // Edge fades and the playhead.
-        Rectangle { anchors { left: parent.left; top: parent.top; bottom: parent.bottom } width: Style.space(140)
+        Rectangle { anchors { left: parent.left; top: parent.top; bottom: parent.bottom } width: root.sp(140)
           gradient: Gradient { orientation: Gradient.Horizontal; GradientStop { position: 0; color: Util.alpha(root.bg, 0.9) } GradientStop { position: 1; color: Util.alpha(root.bg, 0) } } }
-        Rectangle { anchors { right: parent.right; top: parent.top; bottom: parent.bottom } width: Style.space(140)
+        Rectangle { anchors { right: parent.right; top: parent.top; bottom: parent.bottom } width: root.sp(140)
           gradient: Gradient { orientation: Gradient.Horizontal; GradientStop { position: 0; color: Util.alpha(root.bg, 0) } GradientStop { position: 1; color: Util.alpha(root.bg, 0.9) } } }
-        Rectangle { anchors.horizontalCenter: parent.horizontalCenter; y: -Style.space(4); width: Style.space(2); height: parent.height + Style.space(8); color: root.fg; opacity: 0.9 }
+        Rectangle { anchors.horizontalCenter: parent.horizontalCenter; y: -root.sp(4); width: root.sp(2); height: parent.height + root.sp(8); color: root.fg; opacity: 0.9 }
 
         MouseArea {
           anchors.fill: parent
@@ -781,28 +769,28 @@ Item {
 
       // ---- footer
       Text {
-        anchors { left: parent.left; bottom: parent.bottom; leftMargin: Style.space(56); bottomMargin: Style.space(14) }
+        anchors { left: parent.left; bottom: parent.bottom; leftMargin: root.sp(56); bottomMargin: root.sp(14) }
         text: root.rows.length ? (root.selectedIndex + 1) + " / " + root.rows.length + (root.rows.length !== root.themes.length ? "  (" + root.themes.length + " total)" : "") : "no themes match"
         color: root.fg; opacity: 0.75
-        font.family: Style.fontFamily; font.pixelSize: Style.font.caption
+        font.family: Style.fontFamily; font.pixelSize: root.fz.caption
       }
       Row {
-        anchors { right: parent.right; bottom: parent.bottom; rightMargin: Style.space(56); bottomMargin: Style.space(14) }
-        spacing: Style.space(18)
+        anchors { right: parent.right; bottom: parent.bottom; rightMargin: root.sp(56); bottomMargin: root.sp(14) }
+        spacing: root.sp(18)
         Repeater {
           model: ["← → theme", "↑ ↓ background", "type to filter", "Tab filter", "⏎ apply", "Esc cancel"]
-          Text { required property string modelData; text: modelData; color: root.fg; opacity: 0.75; font.family: Style.fontFamily; font.pixelSize: Style.font.caption }
+          Text { required property string modelData; text: modelData; color: root.fg; opacity: 0.75; font.family: Style.fontFamily; font.pixelSize: root.fz.caption }
         }
       }
     }
   }
 
-  readonly property int thumbW: Style.space(188)
-  readonly property int thumbH: Style.space(106)
-  readonly property int bgThumbW: Style.space(150)
-  readonly property int bgThumbH: Style.space(84)
-  readonly property int bgStripH: Style.space(84) * 4 + Style.space(8) * 3
+  readonly property int thumbW: root.sp(188)
+  readonly property int thumbH: root.sp(106)
+  readonly property int bgThumbW: root.sp(150)
+  readonly property int bgThumbH: root.sp(84)
+  readonly property int bgStripH: root.sp(84) * 4 + root.sp(8) * 3
 
   // Keep the index warm so the first open doesn't wait on a cold walk.
-  Component.onCompleted: indexProc.running = true
+  Component.onCompleted: { freezeMetrics(); indexProc.running = true }
 }
