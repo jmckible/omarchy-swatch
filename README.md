@@ -59,6 +59,14 @@ theme=$(~/.config/omarchy/plugins/jmckible.swatch/pick.sh) && omarchy theme set 
 - Live preview is the same call `omarchy theme set` makes over IPC (`shell applyTheme`) — shell-only, reverted on cancel, never written to disk. Terminal palettes and Hyprland borders change on apply, not during preview.
 - Video: the first `backgrounds/*.mp4|webm` plays muted on loop from frame 0 over the still, via the shell's own Qt Multimedia. Only the selected theme decodes video.
 
+## Remove
+
+```sh
+omarchy plugin remove jmckible.swatch --yes
+```
+
+Then delete the `"style.theme"` line you added to `~/.config/omarchy/extensions/omarchy-menu.jsonc` to restore the stock picker, and optionally the cache at `~/.cache/omarchy/swatch/`. Swatch writes nothing else.
+
 ## Develop
 
 ```sh
