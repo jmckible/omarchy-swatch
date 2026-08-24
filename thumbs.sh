@@ -25,7 +25,12 @@ MAX_JOBS=512
 PAR=$(( $(nproc) / 2 )); (( PAR < 1 )) && PAR=1; (( PAR > 4 )) && PAR=4
 
 mkdir -p "$SWATCH_THUMBS"
-exec 9>"$SWATCH_CACHE/thumbs.lock"; flock -n 9 || exit 0   # one run at a time
+# One run at a time. The lock descriptor is a read-only open of this script's
+# own file: nothing is created or truncated, and no predictable path in a
+# writable directory is involved. (A swap of the plugin's own code is outside
+# every boundary — it is the code.)
+exec 9<"${BASH_SOURCE[0]}" || exit 0
+flock -n 9 || exit 0
 
 index=$(read_bounded "$SWATCH_INDEX" "$MAX_INDEX_BYTES") || exit 0
 jq -e '.themes | type == "array"' <<<"$index" >/dev/null 2>&1 || exit 0
@@ -36,6 +41,11 @@ read -r W H < <(jq -r '"\(.stageW // 0) \(.stageH // 0)"' <<<"$index" 2>/dev/nul
 
 snapdir=$(mktemp -d "${XDG_RUNTIME_DIR:-$SWATCH_CACHE}/swatch-snap.XXXXXXXX") || exit 1
 trap 'rm -rf -- "$snapdir"' EXIT
+
+# A reject marker is an exclusive create (noclobber → O_EXCL), never a
+# truncating redirect: a link planted at the predictable reject-<key> path
+# makes the create fail, and nothing it points to is touched.
+mark_reject() { (set -C; : >"$1") 2>/dev/null; }
 
 # vips on one file, bounded: single-threaded, 2 GB address space, deadline.
 # vipsthumbnail exits 0 on unreadable input, so the output is what is checked.
@@ -56,7 +66,7 @@ gen() {
   [[ -e $reject ]] && return 0
   [[ -f $stage && -f $thumb ]] && return 0
   snap=$(mktemp "$snapdir/img.XXXXXXXX") || return 0
-  if ! read_bounded "$src" "$MAX_IMAGE_BYTES" >"$snap"; then rm -f -- "$snap"; : >"$reject"; return 0; fi
+  if ! read_bounded "$src" "$MAX_IMAGE_BYTES" >"$snap"; then rm -f -- "$snap"; mark_reject "$reject"; return 0; fi
   # Header of the snapshot: "<path>: <W>x<H> <fmt>, <bands> band(s), <space>, <loader>".
   # Capture before the loader test: a second =~ overwrites BASH_REMATCH.
   line=$(timeout 5s vipsheader -- "$snap" 2>/dev/null)
@@ -64,15 +74,15 @@ gen() {
     w=${BASH_REMATCH[1]}; h=${BASH_REMATCH[2]}; loader=${BASH_REMATCH[3]}
   fi
   if [[ $loader =~ $LOADERS ]] && (( w > 0 && h > 0 && w * h <= MAX_PIXELS )); then
-    [[ -f $stage ]] || vips_to "$snap" "${W}x${H}>" "$stage" 85 || : >"$reject"
-    [[ -f $thumb ]] || vips_to "$snap" 640x360 "$thumb" 80 || : >"$reject"
+    [[ -f $stage ]] || vips_to "$snap" "${W}x${H}>" "$stage" 85 || mark_reject "$reject"
+    [[ -f $thumb ]] || vips_to "$snap" 640x360 "$thumb" 80 || mark_reject "$reject"
   else
-    : >"$reject"
+    mark_reject "$reject"
   fi
   rm -f -- "$snap"
   return 0
 }
-export -f gen vips_to read_bounded
+export -f gen vips_to read_bounded mark_reject
 export SWATCH_READ_PY SWATCH_READ_PL SWATCH_THUMBS MAX_IMAGE_BYTES MAX_PIXELS LOADERS snapdir W H
 
 # Jobs: current theme first so the first open lands on a finished stage;

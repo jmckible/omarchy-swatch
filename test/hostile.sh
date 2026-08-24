@@ -108,6 +108,19 @@ echo "--- thumbs.sh again (idempotent)"
 start=$SECONDS; "$here/thumbs.sh"; echo "     ${SECONDS-start}s"
 check "other size expired after 30 days, recent one kept" "$([[ -e $D/stage-${pk}-1280x720.jpg ]] && echo old),$([[ -e $D/stage-${pk}-1920x1080.jpg ]] && echo recent)" ",recent"
 
+echo "--- planted links cannot redirect writes"
+victim=$T/victim; printf 'precious' >"$victim"
+ln -sfn "$victim" "$XDG_CACHE_HOME/omarchy/swatch/thumbs.lock"         # legacy lock path
+head -c 100 /dev/urandom >"$U/good/backgrounds/notimage.png"           # will be refused by the header check
+idx3=$("$here/index.sh")
+nk=$(jq -r '.themes[] | select(.name == "good") | .backgrounds as $b | .bgKeys as $k | ($b | to_entries[] | select(.value | endswith("notimage.png")) | .key) as $i | $k[$i]' <<<"$idx3")
+ln -sfn "$T/victim2" "$D/reject-$nk"                                   # dangling link at the predictable marker path
+"$here/thumbs.sh"
+check "victim not truncated through lock path"  "$(cat "$victim")" precious
+check "dangling reject link not followed"       "$([[ -e $T/victim2 ]] && echo created)" ""
+check "refused image produced no derivatives"   "$(ls "$D/stage-$nk"-*.jpg "$D/bg-$nk.jpg" 2>/dev/null | wc -l)" 0
+rm -f "$U/good/backgrounds/notimage.png" "$D/reject-$nk"
+
 echo "--- apply.sh --pick"
 d=$(mktemp -d); "$here/apply.sh" --pick "$d" good; check "pick writes selection+done" "$(cat "$d/selection"),$([[ -e $d/done ]] && echo done)" "good,done"
 d2=$(mktemp -d); "$here/apply.sh" --pick "$d2" ""; check "cancel writes done only" "$([[ -e $d2/selection ]] && echo sel),$([[ -e $d2/done ]] && echo done)" ",done"
