@@ -22,6 +22,13 @@ assert.deepEqual(Model.filter(T, "", "installed").map((t) => t.name), ["last-cal
 assert.deepEqual(Model.filter(T, "", "stock").map((t) => t.name), ["tokyo-night", "rose-pine"])
 assert.deepEqual(Model.filter(T, "Tokyo", "dark").map((t) => t.name), ["tokyo-night"])
 
+// Fuzzy: typed characters match as an in-order subsequence, gaps allowed.
+assert.deepEqual(Model.filter(T, "tkn", "all").map((t) => t.name), ["tokyo-night"])
+assert.deepEqual(Model.filter(T, "rpine", "all").map((t) => t.name), ["rose-pine"])
+assert.deepEqual(Model.filter(T, "LC", "all").map((t) => t.name), ["last-call"])   // via the label, case-folded
+assert.deepEqual(Model.filter(T, "nkt", "all").map((t) => t.name), [])             // out of order stays a miss
+assert.deepEqual(Model.filter(T, "tokyoz", "all").map((t) => t.name), [])
+
 assert.equal(Model.nextMode("all"), "dark")
 assert.equal(Model.nextMode("installed"), "stock")
 assert.equal(Model.nextMode("stock"), "all")

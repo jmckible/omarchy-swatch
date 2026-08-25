@@ -4,6 +4,15 @@
 
 function norm(s) { return String(s || "").toLowerCase() }
 
+// Subsequence match: the typed characters appear in order, gaps allowed, so
+// "catl" finds "catppuccin-latte". A substring hit is the gapless case.
+function fuzzy(haystack, needle) {
+  var i = 0
+  for (var j = 0; j < haystack.length && i < needle.length; j++)
+    if (haystack[j] === needle[i]) i++
+  return i === needle.length
+}
+
 function matches(theme, text, mode) {
   if (mode === "dark" && theme.mode !== "dark") return false
   if (mode === "light" && theme.mode !== "light") return false
@@ -11,7 +20,7 @@ function matches(theme, text, mode) {
   if (mode === "stock" && theme.source !== "stock") return false
   if (!text) return true
   var needle = norm(text)
-  return norm(theme.name).indexOf(needle) !== -1 || norm(theme.label).indexOf(needle) !== -1
+  return fuzzy(norm(theme.name), needle) || fuzzy(norm(theme.label), needle)
 }
 
 function filter(themes, text, mode) {

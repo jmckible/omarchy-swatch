@@ -663,6 +663,35 @@ Item {
         }
       }
 
+      // ---- empty state: the filter ate everything
+      Column {
+        anchors.centerIn: parent
+        spacing: root.sp(10)
+        visible: root.rows.length === 0 && root.themes.length > 0
+
+        Text {
+          anchors.horizontalCenter: parent.horizontalCenter
+          text: root.filterText ? "No themes match “" + root.filterText + "”" : "No " + root.modeFilter + " themes"
+          textFormat: Text.PlainText
+          color: root.fg
+          font.family: Style.fontFamily
+          font.pixelSize: Math.round(root.fz.heading * root.k)
+          font.weight: Font.DemiBold
+          style: Text.Outline
+          styleColor: Util.alpha(root.bg, 0.7)
+        }
+        Text {
+          anchors.horizontalCenter: parent.horizontalCenter
+          text: root.filterText ? "Esc clears the filter" : "Tab cycles the filter"
+          color: root.fg
+          opacity: 0.75
+          font.family: Style.fontFamily
+          font.pixelSize: root.metaPx
+          style: Text.Outline
+          styleColor: Util.alpha(root.bg, 0.7)
+        }
+      }
+
       // ---- filmstrip under a fixed playhead
       Item {
         id: stripArea
