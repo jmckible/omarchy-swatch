@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Effects
+import QtQuick.Shapes
 import Quickshell
 import Quickshell.Io
 import Quickshell.Wayland
@@ -44,7 +45,7 @@ Item {
   property real exitBlur: 0
   property real blackout: 0
   property bool liftPending: false
-  readonly property int holdFloorMs: 140
+  readonly property int holdFloorMs: 180
 
   // Which strip the last move was in, and which way. The transition follows the
   // axis you pressed: themes are a horizontal filmstrip, backgrounds a vertical
@@ -52,6 +53,42 @@ Item {
   property string scrubAxis: "theme"
   property int scrubDir: 1
   property bool scrubArmed: false
+  property bool scrubQuick: false   // already mid-wipe: don't queue another
+
+  // A luma wipe: one greyscale map, one threshold swept across it. The map is
+  // what makes the look — a gradient is a hard-edged wipe, a radial one is an
+  // iris, a noise field is a burn — so the effect is chosen by picking a map,
+  // not by writing another animation. maskSpreadAtMin is the softness of the
+  // leading edge, which is most of the difference between cheap and expensive.
+  property string wipeFrom: ""
+  property real wipeT: 0
+  property bool wiping: false
+  property string wipeMap: "gradient"        // gradient | iris | burn
+
+  // The strip lands in 160 ms, and it is the thing your hand is driving, so a
+  // wipe much longer than that stops being the same gesture and becomes an
+  // animation you wait through. Duration tracks how fast you are moving, and
+  // the edge softens as it shortens — a hard line at speed is a strobe, a wide
+  // soft band at speed still reads as a sweep. Character comes from the edge,
+  // not from the clock.
+  property double lastMoveAt: 0
+  property bool scrubRapid: false
+  // Both axes wipe; the difference is the edge, not the mechanism. A theme is a
+  // different world arriving, so it gets a defined edge. A background is the
+  // same theme one frame further along its own strip, so it gets a wide soft
+  // one that reads as a dissolve with a direction rather than as a cut.
+  readonly property bool wipingBg: scrubAxis === "bg"
+  readonly property int wipeMs: scrubRapid ? 140 : (wipingBg ? 220 : 240)
+  readonly property real wipeSpread: wipeMap === "iris"
+    ? (scrubRapid ? 0.34 : 0.16)
+    : wipingBg ? (scrubRapid ? 0.42 : 0.34)
+               : (scrubRapid ? 0.30 : 0.12)
+
+  // A theme change is the bar's to make: the crossfade waits until the bar is
+  // most of the way across and then happens fast enough to read as a cut. Held
+  // arrow keys fall back to a plain quick blend — a bar per keypress is a mess.
+  readonly property int fadeMs: scrubAxis === "bg" ? 150 : (scrubQuick ? 110 : 90)
+  readonly property int fadeDelayMs: (scrubAxis === "bg" || scrubQuick) ? 0 : 170
   // Everything that isn't the wallpaper. It goes the moment a choice is
   // committed, leaving the candidate's wallpaper and the real bar — which is
   // the desktop that is a moment away. Instant on open (the Behavior is armed
@@ -129,6 +166,8 @@ Item {
     blackout = 0
     liftPending = false
     scrubArmed = false
+    scrubQuick = false
+    wipeRun.stop(); wiping = false; wipeFrom = ""
     stage.opacity = 1
     wallpaperLayer.scale = 1
     freezeMetrics()
@@ -206,15 +245,26 @@ Item {
 
   // ---------------------------------------------------------------- navigation
 
-  function setFilter(text) { filterText = text; rebuild(false) }
-  function cycleMode() { modeFilter = Model.nextMode(modeFilter); rebuild(false) }
+  // Every move is classified here: which strip, which way, and whether it is a
+  // deliberate press or one of a burst.
+  function noteMove(axis, dir) {
+    var now = Date.now()
+    scrubRapid = (now - lastMoveAt) < 420
+    lastMoveAt = now
+    scrubAxis = axis
+    scrubDir = dir
+    scrubQuick = wiping
+  }
+
+  function setFilter(text) { scrubQuick = true; filterText = text; rebuild(false) }
+  function cycleMode() { scrubQuick = true; modeFilter = Model.nextMode(modeFilter); rebuild(false) }
 
   // Single steps wrap around the ends; page jumps and Home/End clamp.
   function move(delta, wrap) {
     if (!rows.length) return
     var next = wrap ? Model.wrap(selectedIndex + delta, rows.length) : Model.clamp(selectedIndex + delta, rows.length)
     if (next === selectedIndex) return
-    scrubAxis = "theme"; scrubDir = delta < 0 ? -1 : 1
+    noteMove("theme", delta < 0 ? -1 : 1)
     selectedIndex = next
     bgIndex = 0
   }
@@ -223,7 +273,7 @@ Item {
     if (!rows.length) return
     var next = Model.clamp(index, rows.length)
     if (next === selectedIndex) return
-    scrubAxis = "theme"; scrubDir = next < selectedIndex ? -1 : 1
+    noteMove("theme", next < selectedIndex ? -1 : 1)
     selectedIndex = next
     bgIndex = 0
   }
@@ -231,7 +281,7 @@ Item {
   function moveBackground(delta) {
     var t = selected
     if (!t || !t.backgrounds || t.backgrounds.length < 2) return
-    scrubAxis = "bg"; scrubDir = delta < 0 ? -1 : 1
+    noteMove("bg", delta < 0 ? -1 : 1)
     bgIndex = (bgIndex + delta + t.backgrounds.length) % t.backgrounds.length
   }
 
@@ -274,10 +324,34 @@ Item {
     slotAge = age
     var slot = slots.indexOf(selectedKey)
     var item = slot === -1 ? null : wallpapers.itemAt(slot)
-    if (item && item.ready) shownKey = selectedKey
+    if (item && item.ready) setShown(selectedKey)
   }
 
-  function slotReady(key) { if (key && key === selectedKey) shownKey = key }
+  function slotReady(key) { if (key && key === selectedKey) setShown(key) }
+
+  // The wipe needs both sides for its whole run, so the key being replaced is
+  // held rather than left to the slot bindings to forget. The decision is taken
+  // here, before shownKey moves: set `wiping` afterwards and the incoming slot
+  // gets one unmasked frame, which is the whole effect given away.
+  function setShown(key) {
+    if (!key || key === shownKey) return
+    var prev = shownKey
+    wipeFrom = prev
+    var moving = opened && !applying && scrubArmed && !!prev
+    var wipe = moving && !scrubQuick && !wiping
+    if (wipe) {
+      wipeT = 1 + wipeSpread
+      wipeSweep.to = -wipeSpread
+      wipeSweep.duration = wipeMs
+      wiping = true
+    }
+    // A move arriving mid-wipe ends it rather than redirecting it: the sweep
+    // would otherwise carry on revealing a frame it never started on.
+    else if (wiping) { wipeRun.stop(); wiping = false; wipeFrom = "" }
+    shownKey = key
+    scrubArmed = true          // the first key of an open is a landing, not a move
+    if (wipe) wipeRun.restart()
+  }
 
   // ---------------------------------------------------------------- preview
 
@@ -372,11 +446,20 @@ Item {
     liftPending = false
   }
 
+  // The phases have to be separated in time or they cancel each other out: run
+  // the blackout and the defocus on the same curve and the picture is already
+  // dark before the blur is worth looking at, which leaves a plain dip to black.
+  // So the defocus leads going down, and on the way back the black clears first
+  // and the picture sharpens long after it — asymmetric, because a fast collapse
+  // and a slow arrival is what makes it read as a decision rather than a fade.
   ParallelAnimation {
     id: dipDown
-    NumberAnimation { target: root; property: "blackout"; to: 1; duration: 300; easing.type: Easing.InQuad }
-    NumberAnimation { target: root; property: "exitBlur"; to: 1; duration: 340; easing.type: Easing.InQuad }
-    NumberAnimation { target: wallpaperLayer; property: "scale"; to: 1.035; duration: 440; easing.type: Easing.OutQuad }
+    NumberAnimation { target: root; property: "exitBlur"; to: 1; duration: 300; easing.type: Easing.InQuad }
+    NumberAnimation { target: wallpaperLayer; property: "scale"; to: 1.10; duration: 460; easing.type: Easing.OutQuad }
+    SequentialAnimation {
+      PauseAnimation { duration: 200 }   // 200 ms of visible defocus before any black
+      NumberAnimation { target: root; property: "blackout"; to: 1; duration: 260; easing.type: Easing.InQuad }
+    }
     onFinished: if (root.liftPending) { root.liftPending = false; liftUp.restart() }
   }
 
@@ -384,50 +467,34 @@ Item {
     id: liftUp
     PauseAnimation { duration: root.holdFloorMs }
     ParallelAnimation {
-      NumberAnimation { target: root; property: "blackout"; to: 0; duration: 320; easing.type: Easing.OutQuad }
-      NumberAnimation { target: root; property: "exitBlur"; to: 0; duration: 420; easing.type: Easing.OutCubic }
-      NumberAnimation { target: wallpaperLayer; property: "scale"; to: 1; duration: 420; easing.type: Easing.OutCubic }
+      NumberAnimation { target: root; property: "blackout"; to: 0; duration: 300; easing.type: Easing.OutQuad }
+      NumberAnimation { target: root; property: "exitBlur"; to: 0; duration: 640; easing.type: Easing.OutCubic }
+      NumberAnimation { target: wallpaperLayer; property: "scale"; to: 1; duration: 640; easing.type: Easing.OutCubic }
     }
     // The cover is sharp again and identical to the desktop under it, so this
     // last crossfade is invisible — the matching image finally paying off.
-    NumberAnimation { target: stage; property: "opacity"; to: 0; duration: 140 }
+    NumberAnimation { target: stage; property: "opacity"; to: 0; duration: 160 }
     onFinished: root.dismiss()
   }
 
   // ---------------------------------------------------------------- scrubbing
 
-  onShownKeyChanged: {
-    if (!opened || applying || !shownKey) return
-    if (!scrubArmed) { scrubArmed = true; return }   // the first frame of an open
-    startScrub()
+  // Themes get the bar, which is the transition rather than a decoration over
+  // one: the crossfade behind it is delayed and short enough that the wallpaper
+  // changes while the bar is on top of the seam. Backgrounds get a quiet push
+  // along their own vertical axis and no bar — the smaller move, kept smaller.
+  //
+  // Constant velocity on purpose. Easing in and out is what makes a wipe read
+  // as a fade, and the bar starts and ends off-screen so there is nothing to
+  // ease into.
+  // The threshold runs from above the map's range to below it, so the reveal
+  // starts with nothing and finishes with everything. Constant velocity: an
+  // eased wipe reads as a fade.
+  SequentialAnimation {
+    id: wipeRun
+    NumberAnimation { id: wipeSweep; target: root; property: "wipeT"; easing.type: Easing.Linear }
+    ScriptAction { script: { root.wiping = false; root.wipeFrom = "" } }
   }
-
-  // Themes get a blade across the horizontal axis they live on; backgrounds get
-  // a quieter push along their vertical one. A blade already in flight is left
-  // alone, so holding an arrow key thins the effect out instead of stacking it.
-  function startScrub() {
-    if (scrubAxis === "bg") {
-      wallpaperLayer.nudgeX = 0
-      nudgeY.stop()
-      nudgeY.from = scrubDir * panel.height * 0.055
-      nudgeY.to = 0
-      nudgeY.start()
-      return
-    }
-    wallpaperLayer.nudgeY = 0
-    nudgeX.stop()
-    nudgeX.from = scrubDir * panel.width * 0.045
-    nudgeX.to = 0
-    nudgeX.start()
-    if (bladeRun.running) return
-    bladeRun.from = scrubDir > 0 ? -bladeEdge.width : panel.width
-    bladeRun.to = scrubDir > 0 ? panel.width : -bladeEdge.width
-    bladeRun.restart()
-  }
-
-  NumberAnimation { id: nudgeX; target: wallpaperLayer; property: "nudgeX"; duration: 240; easing.type: Easing.OutCubic }
-  NumberAnimation { id: nudgeY; target: wallpaperLayer; property: "nudgeY"; duration: 200; easing.type: Easing.OutCubic }
-  NumberAnimation { id: bladeRun; target: bladeEdge; property: "x"; duration: 260; easing.type: Easing.InOutQuad }
 
   // Answer pick.sh: the selection (empty on cancel) and the done marker.
   function finishPick(name) {
@@ -485,18 +552,74 @@ Item {
       layer.effect: MultiEffect {
         blurEnabled: true
         blur: root.exitBlur
-        blurMax: 40
+        // Proportional, not constant: a blur radius is in pixels, so the same
+        // number is a far weaker effect on a large screen than on a small one.
+        blurMax: Math.min(64, Math.max(28, Math.round(stage.width * 0.035)))
       }
 
       Rectangle { anchors.fill: parent; color: root.bg }
 
+      // Screen geometry, not stage geometry. The stage is inset by the bar's
+      // band, and PreserveAspectCrop fits the image to whatever rect it is
+      // given — so fitting it here would crop it differently from the desktop
+      // underneath, and the hand-off at the end of the exit would snap by about
+      // half a bar height. Fill the panel and let the stage's clip keep it out
+      // of the bar band instead, so both sides frame the picture identically.
       Item {
         id: wallpaperLayer
-        anchors.fill: parent
-        // Anchored, so the scrub's travel goes through a transform rather than x/y.
-        property real nudgeX: 0
-        property real nudgeY: 0
-        transform: Translate { x: wallpaperLayer.nudgeX; y: wallpaperLayer.nudgeY }
+        x: root.barPosition === "left" ? -root.barInset : 0
+        y: root.barPosition === "top" ? -root.barInset : 0
+        width: panel.width
+        height: panel.height
+
+        // The map. A linear ramp makes the threshold sweep read as a straight
+        // edge travelling across the screen; a radial one makes it an iris. It
+        // is never drawn — MultiEffect samples it as a texture.
+        //
+        // The ramp has to be in ALPHA, not in grey: MultiEffect thresholds the
+        // mask's alpha channel and ignores its colour. A black-to-white ramp is
+        // opaque end to end, so the whole image flips the moment the threshold
+        // crosses it — which looks like nothing happening. White throughout,
+        // transparent to opaque.
+        Item {
+          id: wipeMask
+          anchors.fill: parent
+          visible: false
+          layer.enabled: true
+
+          Rectangle {
+            anchors.fill: parent
+            visible: root.wipeMap === "gradient"
+            // Turns with the axis you pressed: across for themes, down the
+            // screen for backgrounds. Position 0 is left, or top.
+            gradient: Gradient {
+              orientation: root.wipingBg ? Gradient.Vertical : Gradient.Horizontal
+              GradientStop { position: 0.0; color: root.scrubDir > 0 ? "#00ffffff" : "#ffffffff" }
+              GradientStop { position: 1.0; color: root.scrubDir > 0 ? "#ffffffff" : "#00ffffff" }
+            }
+          }
+
+          Shape {
+            anchors.fill: parent
+            visible: root.wipeMap === "iris"
+            preferredRendererType: Shape.CurveRenderer
+            ShapePath {
+              strokeColor: "transparent"
+              fillGradient: RadialGradient {
+                centerX: wipeMask.width / 2; centerY: wipeMask.height * 0.82
+                centerRadius: Math.max(wipeMask.width, wipeMask.height) * 0.95
+                focalX: wipeMask.width / 2; focalY: wipeMask.height * 0.82
+                GradientStop { position: 0.0; color: "#ffffffff" }
+                GradientStop { position: 1.0; color: "#00ffffff" }
+              }
+              startX: 0; startY: 0
+              PathLine { x: wipeMask.width; y: 0 }
+              PathLine { x: wipeMask.width; y: wipeMask.height }
+              PathLine { x: 0; y: wipeMask.height }
+              PathLine { x: 0; y: 0 }
+            }
+          }
+        }
 
         Repeater {
           id: wallpapers
@@ -506,9 +629,27 @@ Item {
             required property int index
             readonly property string key: root.slots[index]
             readonly property bool ready: stageImg.status === Image.Ready || softImg.status === Image.Ready
+            readonly property bool incoming: key && key === root.shownKey
+            readonly property bool outgoing: root.wiping && key && key === root.wipeFrom
             anchors.fill: parent
-            opacity: key && key === root.shownKey ? 1 : 0
-            Behavior on opacity { NumberAnimation { duration: 160; easing.type: Easing.InOutQuad } }
+            // During a wipe both sides are opaque and the mask does the work;
+            // otherwise this is the plain crossfade it always was.
+            z: incoming ? 1 : 0
+            opacity: incoming || outgoing ? 1 : 0
+            Behavior on opacity {
+              enabled: !root.wiping
+              SequentialAnimation {
+                PauseAnimation { duration: root.fadeDelayMs }
+                NumberAnimation { duration: root.fadeMs; easing.type: Easing.InOutQuad }
+              }
+            }
+            layer.enabled: root.wiping && incoming
+            layer.effect: MultiEffect {
+              maskEnabled: true
+              maskSource: wipeMask
+              maskThresholdMin: root.wipeT
+              maskSpreadAtMin: root.wipeSpread
+            }
             onReadyChanged: if (ready) root.slotReady(key)
             // The filmstrip thumb stands in, soft, until the stage copy exists.
             CacheImage {
@@ -529,6 +670,17 @@ Item {
         }
       }
 
+      // The filter matched nothing. Dim the wallpaper rather than leaving the
+      // last match sitting there full-strength looking like a result — the
+      // stage is showing a theme that is no longer in the list.
+      Rectangle {
+        anchors.fill: parent
+        color: root.bg
+        opacity: root.rows.length === 0 && root.themes.length > 0 ? 0.72 : 0
+        visible: opacity > 0
+        Behavior on opacity { NumberAnimation { duration: 200; easing.type: Easing.OutQuad } }
+      }
+
       // Scrims: a light lid at the top for the title, a heavier one at the
       // bottom for the strip. Both in the candidate's own background colour.
       Rectangle {
@@ -547,29 +699,6 @@ Item {
         gradient: Gradient {
           GradientStop { position: 0.0; color: Util.alpha(root.bg, 0.0) }
           GradientStop { position: 1.0; color: Util.alpha(root.bg, 0.94) }
-        }
-      }
-
-      // The blade: a bar of the candidate's accent crossing the wallpaper when
-      // the theme changes. Above the scrims so it stays crisp, below the chrome
-      // so the name and the strip keep their contrast.
-      Item {
-        id: bladeBand
-        anchors.fill: parent
-        visible: bladeRun.running
-        Rectangle {
-          id: bladeEdge
-          width: Math.round(parent.width * 0.15)
-          height: parent.height * 1.4
-          y: -parent.height * 0.2
-          transform: Rotation { origin.x: bladeEdge.width / 2; origin.y: bladeEdge.height / 2; angle: 6 }
-          gradient: Gradient {
-            orientation: Gradient.Horizontal
-            GradientStop { position: 0.0; color: Util.alpha(root.accent, 0) }
-            GradientStop { position: 0.74; color: Util.alpha(root.accent, 0.34) }
-            GradientStop { position: 0.96; color: Util.alpha(root.fg, 0.8) }
-            GradientStop { position: 1.0; color: Util.alpha(root.accent, 0) }
-          }
         }
       }
 
