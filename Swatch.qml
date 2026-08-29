@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Effects
 import Quickshell
 import Quickshell.Io
 import Quickshell.Wayland
@@ -33,6 +34,30 @@ Item {
   property string thumbsDir: ""
   property int cacheGen: 0    // ticks while thumbs.sh lands derivatives; failed loads retry on it
   property bool applying: false
+  property string applyTarget: ""   // the background we are waiting to see land
+
+  // Exit: the preview defocuses into black, holds there while the real swap
+  // lands underneath, then resolves back out sharp onto a desktop it already
+  // matches. Black is the only element that reads against a matching image —
+  // and while it is up nothing can look wrong, so the hold absorbs a late swap
+  // or a slow decode instead of us betting a constant on them.
+  property real exitBlur: 0
+  property real blackout: 0
+  property bool liftPending: false
+  readonly property int holdFloorMs: 140
+
+  // Which strip the last move was in, and which way. The transition follows the
+  // axis you pressed: themes are a horizontal filmstrip, backgrounds a vertical
+  // one, so the motion itself says which list you are moving through.
+  property string scrubAxis: "theme"
+  property int scrubDir: 1
+  property bool scrubArmed: false
+  // Everything that isn't the wallpaper. It goes the moment a choice is
+  // committed, leaving the candidate's wallpaper and the real bar — which is
+  // the desktop that is a moment away. Instant on open (the Behavior is armed
+  // only while applying) so the picker doesn't fade in over itself.
+  property real chromeOpacity: 1
+  Behavior on chromeOpacity { enabled: root.applying; NumberAnimation { duration: 180; easing.type: Easing.OutQuad } }
   property bool livePreview: true
 
   readonly property var selected: (selectedIndex >= 0 && selectedIndex < rows.length) ? rows[selectedIndex] : null
@@ -75,6 +100,12 @@ Item {
 
   readonly property string barPosition: shell && shell.bar && shell.bar.position ? shell.bar.position : "top"
   readonly property int barSize: shell && shell.bar && shell.bar.barSize ? shell.bar.barSize : 0
+  // The carve-out below is only honest while the bar paints its own background.
+  // A transparent bar is a hole onto the wallpaper we are leaving; a hidden bar
+  // is a hole onto nothing. Either way the band shows the old theme hard against
+  // the candidate's, so cover it and let the scrim run to the screen edge.
+  readonly property bool barOpaque: !!(shell && shell.bar) && !shell.bar.transparent && !shell.bar.barHidden
+  readonly property int barInset: barOpaque ? barSize : 0
 
   // Stage copies are made at the largest monitor's physical size, measured by
   // index.sh. The shell never decodes a theme's own file; everything it shows
@@ -90,7 +121,16 @@ Item {
     var args = {}
     try { args = JSON.parse(payloadJson || "{}") || {} } catch (e) { args = {} }
     pickDir = String(args.dir || "")
+    cancelExit()
     applying = false
+    applyTarget = ""
+    chromeOpacity = 1
+    exitBlur = 0
+    blackout = 0
+    liftPending = false
+    scrubArmed = false
+    stage.opacity = 1
+    wallpaperLayer.scale = 1
     freezeMetrics()
     filterText = ""
     modeFilter = "all"
@@ -102,6 +142,7 @@ Item {
   function close() {
     if (!applying && livePreview) revertPreview()
     if (pickDir && !applying) finishPick("")
+    cancelExit()
     opened = false
   }
 
@@ -155,7 +196,7 @@ Item {
     selectedIndex = i
     if (landOnCurrent) {
       var t = selected
-      var bi = t && t.backgrounds ? t.backgrounds.indexOf(currentBackground) : -1
+      var bi = Model.backgroundIndexOf(t, currentBackground)
       bgIndex = bi === -1 ? 0 : bi
     } else if (keep !== (selected ? selected.name : "")) {
       bgIndex = 0
@@ -173,6 +214,7 @@ Item {
     if (!rows.length) return
     var next = wrap ? Model.wrap(selectedIndex + delta, rows.length) : Model.clamp(selectedIndex + delta, rows.length)
     if (next === selectedIndex) return
+    scrubAxis = "theme"; scrubDir = delta < 0 ? -1 : 1
     selectedIndex = next
     bgIndex = 0
   }
@@ -181,6 +223,7 @@ Item {
     if (!rows.length) return
     var next = Model.clamp(index, rows.length)
     if (next === selectedIndex) return
+    scrubAxis = "theme"; scrubDir = next < selectedIndex ? -1 : 1
     selectedIndex = next
     bgIndex = 0
   }
@@ -188,6 +231,7 @@ Item {
   function moveBackground(delta) {
     var t = selected
     if (!t || !t.backgrounds || t.backgrounds.length < 2) return
+    scrubAxis = "bg"; scrubDir = delta < 0 ? -1 : 1
     bgIndex = (bgIndex + delta + t.backgrounds.length) % t.backgrounds.length
   }
 
@@ -262,19 +306,128 @@ Item {
 
   function apply() {
     var t = selected
-    if (!t) return
+    if (!t || applying) return
     applying = true
-    if (pickDir) {
-      finishPick(t.name)
-    } else {
-      // argv only, through apply.sh — nothing is composed into a shell string.
-      var args = [scriptPath("apply.sh"), t.name]
-      var bg = selectedBackground
-      if (bg && t.backgrounds && t.backgrounds.length > 1 && bg !== Model.backgroundAt(t, 0)) args.push(bg)
-      Quickshell.execDetached(args)
-    }
-    dismiss()
+    chromeOpacity = 0
+    if (pickDir) { finishPick(t.name); dismiss(); return }
+
+    // argv only, through apply.sh — nothing is composed into a shell string.
+    // The background is always named: apply.sh pins it so omarchy-theme-set
+    // cannot cycle to the next one, which is not what the picker was showing.
+    var bg = t.backgrounds && t.backgrounds.length ? selectedBackground : ""
+    var args = [scriptPath("apply.sh"), t.name]
+    if (bg) args.push(bg)
+    applyTarget = bg
+    Quickshell.execDetached(args)
+
+    // Start the dip immediately; the swap gets to land inside the black.
+    dipDown.restart()
+    if (bg) { landPoll.restart(); landDeadline.restart() }
+    else landed()   // no background to change; nothing to wait for
   }
+
+  // omarchy-theme-bg-set writes the current-background symlink before it asks
+  // the shell to swap, so the link resolving to our choice is the go signal.
+  // Nothing else about the swap is observable from out here — the decode and
+  // the shell's own reveal both finish unseen, which is exactly what the black
+  // is for. We lift on the signal, not on a guess.
+  readonly property string backgroundLink: home + "/.local/state/omarchy/current/background"
+
+  Timer { id: landPoll; interval: 100; repeat: true; onTriggered: if (!landProc.running) landProc.running = true }
+  Timer { id: landDeadline; interval: 3000; onTriggered: root.landed() }
+
+  Process {
+    id: landProc
+    command: ["readlink", "-f", "--", root.backgroundLink, root.applyTarget]
+    stdout: StdioCollector { waitForEnd: true; onStreamFinished: root.checkLanded(text) }
+  }
+
+  // The last two lines are this run's pair: what the desktop's link points at,
+  // and what we asked for, both canonicalised — so this compares destinations,
+  // not how either path happened to be spelled.
+  function checkLanded(text) {
+    if (!applying) return
+    var lines = String(text || "").trim().split("\n")
+    if (lines.length < 2) return
+    if (lines[lines.length - 2] === lines[lines.length - 1]) landed()
+  }
+
+  function landed() {
+    landPoll.stop()
+    landDeadline.stop()
+    requestLift()
+  }
+
+  // The lift can be asked for before the dip has finished — a background that
+  // was already current answers on the first poll — so it queues behind it.
+  function requestLift() {
+    if (!applying || liftUp.running) return
+    if (dipDown.running) { liftPending = true; return }
+    liftUp.restart()
+  }
+
+  function cancelExit() {
+    landPoll.stop(); landDeadline.stop()
+    dipDown.stop(); liftUp.stop()
+    liftPending = false
+  }
+
+  ParallelAnimation {
+    id: dipDown
+    NumberAnimation { target: root; property: "blackout"; to: 1; duration: 300; easing.type: Easing.InQuad }
+    NumberAnimation { target: root; property: "exitBlur"; to: 1; duration: 340; easing.type: Easing.InQuad }
+    NumberAnimation { target: wallpaperLayer; property: "scale"; to: 1.035; duration: 440; easing.type: Easing.OutQuad }
+    onFinished: if (root.liftPending) { root.liftPending = false; liftUp.restart() }
+  }
+
+  SequentialAnimation {
+    id: liftUp
+    PauseAnimation { duration: root.holdFloorMs }
+    ParallelAnimation {
+      NumberAnimation { target: root; property: "blackout"; to: 0; duration: 320; easing.type: Easing.OutQuad }
+      NumberAnimation { target: root; property: "exitBlur"; to: 0; duration: 420; easing.type: Easing.OutCubic }
+      NumberAnimation { target: wallpaperLayer; property: "scale"; to: 1; duration: 420; easing.type: Easing.OutCubic }
+    }
+    // The cover is sharp again and identical to the desktop under it, so this
+    // last crossfade is invisible — the matching image finally paying off.
+    NumberAnimation { target: stage; property: "opacity"; to: 0; duration: 140 }
+    onFinished: root.dismiss()
+  }
+
+  // ---------------------------------------------------------------- scrubbing
+
+  onShownKeyChanged: {
+    if (!opened || applying || !shownKey) return
+    if (!scrubArmed) { scrubArmed = true; return }   // the first frame of an open
+    startScrub()
+  }
+
+  // Themes get a blade across the horizontal axis they live on; backgrounds get
+  // a quieter push along their vertical one. A blade already in flight is left
+  // alone, so holding an arrow key thins the effect out instead of stacking it.
+  function startScrub() {
+    if (scrubAxis === "bg") {
+      wallpaperLayer.nudgeX = 0
+      nudgeY.stop()
+      nudgeY.from = scrubDir * panel.height * 0.055
+      nudgeY.to = 0
+      nudgeY.start()
+      return
+    }
+    wallpaperLayer.nudgeY = 0
+    nudgeX.stop()
+    nudgeX.from = scrubDir * panel.width * 0.045
+    nudgeX.to = 0
+    nudgeX.start()
+    if (bladeRun.running) return
+    bladeRun.from = scrubDir > 0 ? -bladeEdge.width : panel.width
+    bladeRun.to = scrubDir > 0 ? panel.width : -bladeEdge.width
+    bladeRun.restart()
+  }
+
+  NumberAnimation { id: nudgeX; target: wallpaperLayer; property: "nudgeX"; duration: 240; easing.type: Easing.OutCubic }
+  NumberAnimation { id: nudgeY; target: wallpaperLayer; property: "nudgeY"; duration: 200; easing.type: Easing.OutCubic }
+  NumberAnimation { id: bladeRun; target: bladeEdge; property: "x"; duration: 260; easing.type: Easing.InOutQuad }
 
   // Answer pick.sh: the selection (empty on cancel) and the done marker.
   function finishPick(name) {
@@ -315,21 +468,35 @@ Item {
     readonly property real dpr: screen ? screen.devicePixelRatio : 1
 
     // Everything lives inside this item, which leaves the band where the real
-    // bar sits unpainted — so the bar you see retinting is the actual bar.
+    // bar sits unpainted — so the bar you see retinting is the actual bar. Only
+    // while that band is opaque: see barInset.
     Item {
       id: stage
       anchors.fill: parent
-      anchors.topMargin: root.barPosition === "top" ? root.barSize : 0
-      anchors.bottomMargin: root.barPosition === "bottom" ? root.barSize : 0
-      anchors.leftMargin: root.barPosition === "left" ? root.barSize : 0
-      anchors.rightMargin: root.barPosition === "right" ? root.barSize : 0
+      anchors.topMargin: root.barPosition === "top" ? root.barInset : 0
+      anchors.bottomMargin: root.barPosition === "bottom" ? root.barInset : 0
+      anchors.leftMargin: root.barPosition === "left" ? root.barInset : 0
+      anchors.rightMargin: root.barPosition === "right" ? root.barInset : 0
       clip: true
+
+      // Only live during the exit: a layer on a screen-size item costs a render
+      // target, and there is nothing to defocus while you are still choosing.
+      layer.enabled: root.applying
+      layer.effect: MultiEffect {
+        blurEnabled: true
+        blur: root.exitBlur
+        blurMax: 40
+      }
 
       Rectangle { anchors.fill: parent; color: root.bg }
 
       Item {
         id: wallpaperLayer
         anchors.fill: parent
+        // Anchored, so the scrub's travel goes through a transform rather than x/y.
+        property real nudgeX: 0
+        property real nudgeY: 0
+        transform: Translate { x: wallpaperLayer.nudgeX; y: wallpaperLayer.nudgeY }
 
         Repeater {
           id: wallpapers
@@ -365,6 +532,7 @@ Item {
       // Scrims: a light lid at the top for the title, a heavier one at the
       // bottom for the strip. Both in the candidate's own background colour.
       Rectangle {
+        opacity: root.chromeOpacity
         anchors { top: parent.top; left: parent.left; right: parent.right }
         height: Math.round(parent.height * 0.32)
         gradient: Gradient {
@@ -373,6 +541,7 @@ Item {
         }
       }
       Rectangle {
+        opacity: root.chromeOpacity
         anchors { bottom: parent.bottom; left: parent.left; right: parent.right }
         height: Math.round(parent.height * 0.42)
         gradient: Gradient {
@@ -381,7 +550,30 @@ Item {
         }
       }
 
-      MouseArea { anchors.fill: parent; onClicked: root.dismiss() }
+      // The blade: a bar of the candidate's accent crossing the wallpaper when
+      // the theme changes. Above the scrims so it stays crisp, below the chrome
+      // so the name and the strip keep their contrast.
+      Item {
+        id: bladeBand
+        anchors.fill: parent
+        visible: bladeRun.running
+        Rectangle {
+          id: bladeEdge
+          width: Math.round(parent.width * 0.15)
+          height: parent.height * 1.4
+          y: -parent.height * 0.2
+          transform: Rotation { origin.x: bladeEdge.width / 2; origin.y: bladeEdge.height / 2; angle: 6 }
+          gradient: Gradient {
+            orientation: Gradient.Horizontal
+            GradientStop { position: 0.0; color: Util.alpha(root.accent, 0) }
+            GradientStop { position: 0.74; color: Util.alpha(root.accent, 0.34) }
+            GradientStop { position: 0.96; color: Util.alpha(root.fg, 0.8) }
+            GradientStop { position: 1.0; color: Util.alpha(root.accent, 0) }
+          }
+        }
+      }
+
+      MouseArea { anchors.fill: parent; enabled: !root.applying; onClicked: root.dismiss() }
 
       FocusScope {
         id: keys
@@ -390,6 +582,7 @@ Item {
         Keys.priority: Keys.BeforeItem
         Keys.onPressed: function(event) {
           event.accepted = true
+          if (root.applying) return          // committed; the exit is running
           var k = event.key
           if (k === Qt.Key_Escape) { if (root.filterText) root.setFilter(""); else root.dismiss() }
           else if (k === Qt.Key_Return || k === Qt.Key_Enter) root.apply()
@@ -412,6 +605,7 @@ Item {
 
       // ---- title block
       Column {
+        opacity: root.chromeOpacity
         anchors { left: parent.left; top: parent.top; leftMargin: root.sp(56); topMargin: root.sp(52) }
         spacing: root.sp(12)
         visible: !!root.selected
@@ -533,6 +727,7 @@ Item {
 
       // ---- samples: the palette doing its actual job
       Column {
+        opacity: root.chromeOpacity
         anchors { right: parent.right; top: parent.top; rightMargin: root.sp(56); topMargin: root.sp(52) }
         spacing: root.sp(14)
         visible: !!root.selected
@@ -620,6 +815,7 @@ Item {
 
       // ---- mode chips (Tab cycles, click selects) and the typed filter
       Column {
+        opacity: root.chromeOpacity
         anchors { horizontalCenter: parent.horizontalCenter; top: parent.top; topMargin: root.sp(52) }
         spacing: root.sp(10)
 
@@ -665,6 +861,7 @@ Item {
 
       // ---- empty state: the filter ate everything
       Column {
+        opacity: root.chromeOpacity
         anchors.centerIn: parent
         spacing: root.sp(10)
         visible: root.rows.length === 0 && root.themes.length > 0
@@ -695,6 +892,7 @@ Item {
       // ---- filmstrip under a fixed playhead
       Item {
         id: stripArea
+        opacity: root.chromeOpacity
         anchors { left: parent.left; right: parent.right; bottom: parent.bottom; bottomMargin: root.sp(44) }
         height: root.thumbH + root.sp(24)
 
@@ -800,10 +998,11 @@ Item {
       Text {
         anchors { left: parent.left; bottom: parent.bottom; leftMargin: root.sp(56); bottomMargin: root.sp(14) }
         text: root.rows.length ? (root.selectedIndex + 1) + " / " + root.rows.length + (root.rows.length !== root.themes.length ? "  (" + root.themes.length + " total)" : "") : "no themes match"
-        color: root.fg; opacity: 0.75
+        color: root.fg; opacity: 0.75 * root.chromeOpacity
         font.family: Style.fontFamily; font.pixelSize: root.fz.caption
       }
       Row {
+        opacity: root.chromeOpacity
         anchors { right: parent.right; bottom: parent.bottom; rightMargin: root.sp(56); bottomMargin: root.sp(14) }
         spacing: root.sp(18)
         Repeater {
@@ -811,6 +1010,15 @@ Item {
           Text { required property string modelData; text: modelData; color: root.fg; opacity: 0.75; font.family: Style.fontFamily; font.pixelSize: root.fz.caption }
         }
       }
+    }
+
+    // Outside the stage, so the black takes the bar's band too: a cut should be
+    // a cut, not a dark screen with a lit strip along one edge.
+    Rectangle {
+      anchors.fill: parent
+      color: "black"
+      opacity: root.blackout
+      visible: opacity > 0
     }
   }
 

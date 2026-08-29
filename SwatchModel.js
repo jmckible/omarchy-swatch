@@ -66,6 +66,28 @@ function backgroundAt(theme, bgIndex) {
   return bgs[clamp(bgIndex, bgs.length)]
 }
 
+// Where the desktop's current background sits in a theme's list. The current
+// background link points into the staged copy omarchy-theme-set makes
+// (~/.local/state/omarchy/current/theme/backgrounds/x.jpg), not at the source
+// file this index lists, so an exact path only matches a background the user
+// set themselves through omarchy-theme-bg-set. The copy keeps the file name, so
+// that is the fallback -- without it the picker opens on the theme's first
+// wallpaper while the desktop is showing its fourth.
+function backgroundIndexOf(theme, path) {
+  var bgs = theme && theme.backgrounds ? theme.backgrounds : []
+  if (!path || bgs.length === 0) return -1
+  var exact = bgs.indexOf(path)
+  if (exact !== -1) return exact
+  var base = baseName(path)
+  for (var i = 0; i < bgs.length; i++) if (baseName(bgs[i]) === base) return i
+  return -1
+}
+
+function baseName(path) {
+  var s = String(path || "")
+  return s.slice(s.lastIndexOf("/") + 1)
+}
+
 // Cache key of that same image. Every pixel the overlay shows comes from a
 // derivative thumbs.sh produced under this key.
 function keyAt(theme, bgIndex) {
@@ -84,5 +106,5 @@ function ansi(theme) {
 }
 
 if (typeof module !== "undefined") {
-  module.exports = { matches: matches, filter: filter, nextMode: nextMode, indexOf: indexOf, findByName: findByName, clamp: clamp, wrap: wrap, backgroundAt: backgroundAt, keyAt: keyAt, thumbPath: thumbPath, stagePath: stagePath, ansi: ansi, MODES: MODES }
+  module.exports = { matches: matches, filter: filter, nextMode: nextMode, indexOf: indexOf, findByName: findByName, clamp: clamp, wrap: wrap, backgroundAt: backgroundAt, backgroundIndexOf: backgroundIndexOf, keyAt: keyAt, thumbPath: thumbPath, stagePath: stagePath, ansi: ansi, MODES: MODES }
 }

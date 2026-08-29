@@ -61,6 +61,15 @@ assert.equal(Model.keyAt(T[2], 0), "cccccccccccccccc")   // no backgrounds: the 
 assert.equal(Model.keyAt(T[1], 0), "")
 assert.equal(Model.keyAt(null, 0), "")
 
+// The current-background link resolves into the staged copy, so only the file
+// name matches what the index lists.
+assert.equal(Model.backgroundIndexOf(T[0], "/b/2.jpg"), 1)
+assert.equal(Model.backgroundIndexOf(T[0], "/home/u/.local/state/omarchy/current/theme/backgrounds/2.jpg"), 1)
+assert.equal(Model.backgroundIndexOf(T[0], "/elsewhere/3.jpg"), -1)
+assert.equal(Model.backgroundIndexOf(T[0], ""), -1)
+assert.equal(Model.backgroundIndexOf(T[1], "/b/1.jpg"), -1)
+assert.equal(Model.backgroundIndexOf(null, "/b/1.jpg"), -1)
+
 assert.equal(Model.thumbPath("/c", "1111111111111111"), "/c/bg-1111111111111111.jpg")
 assert.equal(Model.thumbPath("", "1111111111111111"), "")
 assert.equal(Model.stagePath("/c", "1111111111111111", 2560, 1440), "/c/stage-1111111111111111-2560x1440.jpg")
