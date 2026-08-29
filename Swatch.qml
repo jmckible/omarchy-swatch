@@ -7,8 +7,8 @@ import qs.Commons
 import "SwatchModel.js" as Model
 
 // Swatch: try the theme on. The candidate's wallpaper fills the screen, the
-// shell retints to its palette while you scrub, and a filmstrip under a fixed
-// playhead is the only chrome that isn't the theme itself.
+// shell retints to its palette while you scrub, and a filmstrip running through
+// a fixed gate is the only chrome that isn't the theme itself.
 Item {
   id: root
 
@@ -636,9 +636,9 @@ Item {
             Rectangle { required property var modelData; width: Math.round(root.sp(38) * Math.sqrt(root.k)); height: Math.round(root.sp(10) * Math.sqrt(root.k)); color: modelData }
           }
         }
-        // Backgrounds: a vertical filmstrip under its own playhead, same
-        // metaphor as the theme strip turned on its side. Only when there is
-        // something to choose.
+        // Backgrounds: a vertical filmstrip under its own playhead. The theme
+        // strip's gate would crowd a card this size, so here the line stays and
+        // the border does the marking. Only when there is something to choose.
         Item {
           id: bgArea
           visible: !!(root.selected && root.selected.backgrounds.length > 1)
@@ -889,20 +889,24 @@ Item {
         }
       }
 
-      // ---- filmstrip under a fixed playhead
+      // ---- filmstrip running through a fixed gate
       Item {
         id: stripArea
         opacity: root.chromeOpacity
         anchors { left: parent.left; right: parent.right; bottom: parent.bottom; bottomMargin: root.sp(44) }
-        height: root.thumbH + root.sp(24)
+        // Slack above and below the cards: the live one lifts out of the strip
+        // and the gate sits around it, and the ListView clips, so this is what
+        // keeps the scaled card and its shadow whole.
+        height: root.thumbH + root.sp(52)
 
         readonly property int thumbW: root.thumbW
         readonly property int thumbH: root.thumbH
+        readonly property real liveScale: 1.06
+        readonly property int lift: root.sp(7)
 
         ListView {
           id: strip
           anchors.fill: parent
-          anchors.topMargin: root.sp(12)
           orientation: ListView.Horizontal
           model: root.rows
           spacing: root.sp(12)
@@ -923,53 +927,89 @@ Item {
             required property int index
             required property var modelData
             readonly property bool selected: index === root.selectedIndex
+            readonly property int pad: root.sp(22)
             width: stripArea.thumbW
-            height: stripArea.thumbH
+            height: strip.height
+            z: selected ? 2 : 0          // the lifted card, and its shadow, over its neighbours
 
-            Rectangle {
-              anchors.fill: parent
-              color: cell.modelData.colors.background || "#000"
-              opacity: cell.selected ? 1 : 0.82
-              scale: cell.selected ? 1.0 : 0.94
-              Behavior on scale { NumberAnimation { duration: 140 } }
-              Behavior on opacity { NumberAnimation { duration: 140 } }
-              clip: true
+            // A padded box the layer can put the shadow in — the delegate is
+            // exactly a card wide, and a layer only renders what it covers. It
+            // is live on the selected cell alone, so the strip carries one
+            // render target however many themes are in it.
+            Item {
+              id: lifted
+              x: -cell.pad
+              width: cell.width + cell.pad * 2
+              height: cell.height
+              layer.enabled: cell.selected
+              layer.effect: MultiEffect {
+                shadowEnabled: true
+                shadowBlur: 1.0
+                blurMax: 20
+                shadowVerticalOffset: root.sp(6)
+                shadowColor: "#000000"
+                shadowOpacity: 0.55
+              }
 
-              // Painted card: instant, zero I/O. The thumb lands on top.
-              Column {
-                anchors { left: parent.left; top: parent.top; margins: root.sp(10) }
-                spacing: root.sp(5)
-                Rectangle { width: cell.width * 0.55; height: root.sp(5); color: cell.modelData.colors.accent || "#888" }
-                Rectangle { width: cell.width * 0.8; height: root.sp(5); color: cell.modelData.colors.foreground || "#ccc"; opacity: 0.8 }
-                Rectangle { width: cell.width * 0.4; height: root.sp(5); color: cell.modelData.colors.green || "#8c8" }
-              }
-              CacheImage {
-                anchors.fill: parent
-                path: Model.thumbPath(root.thumbsDir, cell.modelData.previewKey)
-                cache: true
-                sourceSize: Qt.size(Math.round(width * panel.dpr), Math.round(height * panel.dpr))
-                visible: status === Image.Ready
-              }
-              Row {
-                anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
-                height: root.sp(4)
-                Repeater { model: Model.ansi(cell.modelData); Rectangle { required property var modelData; width: cell.width / 6; height: root.sp(4); color: modelData } }
-              }
-              Text {
-                anchors { left: parent.left; bottom: parent.bottom; leftMargin: root.sp(8); bottomMargin: root.sp(9) }
-                text: cell.modelData.name
-                textFormat: Text.PlainText
-                color: cell.modelData.colors.foreground || "#fff"
-                font.family: Style.fontFamily
-                font.pixelSize: root.fz.caption
-                style: Text.Outline
-                styleColor: Util.alpha(cell.modelData.colors.background || "#000", 0.9)
-              }
               Rectangle {
-                anchors.fill: parent
-                color: "transparent"
-                border.width: cell.selected ? root.sp(2) : 1
-                border.color: cell.selected ? root.accent : Util.alpha(cell.modelData.colors.foreground || "#fff", 0.18)
+                id: card
+                x: cell.pad
+                y: Math.round((lifted.height - height) / 2) - (cell.selected ? stripArea.lift : 0)
+                width: stripArea.thumbW
+                height: stripArea.thumbH
+                color: cell.modelData.colors.background || "#000"
+                scale: cell.selected ? stripArea.liveScale : 0.92
+                Behavior on scale { NumberAnimation { duration: 140; easing.type: Easing.OutQuad } }
+                Behavior on y { NumberAnimation { duration: 140; easing.type: Easing.OutQuad } }
+                clip: true
+
+                // Painted card: instant, zero I/O. The thumb lands on top.
+                Column {
+                  anchors { left: parent.left; top: parent.top; margins: root.sp(10) }
+                  spacing: root.sp(5)
+                  Rectangle { width: cell.width * 0.55; height: root.sp(5); color: cell.modelData.colors.accent || "#888" }
+                  Rectangle { width: cell.width * 0.8; height: root.sp(5); color: cell.modelData.colors.foreground || "#ccc"; opacity: 0.8 }
+                  Rectangle { width: cell.width * 0.4; height: root.sp(5); color: cell.modelData.colors.green || "#8c8" }
+                }
+                CacheImage {
+                  anchors.fill: parent
+                  path: Model.thumbPath(root.thumbsDir, cell.modelData.previewKey)
+                  cache: true
+                  sourceSize: Qt.size(Math.round(width * panel.dpr), Math.round(height * panel.dpr))
+                  visible: status === Image.Ready
+                }
+                // Neighbours sit under a veil of the candidate's own background,
+                // so the falling-back is palette-driven like everything else
+                // here. The palette bar and the name stay above it, legible.
+                Rectangle {
+                  anchors.fill: parent
+                  color: root.bg
+                  opacity: cell.selected ? 0 : 0.42
+                  Behavior on opacity { NumberAnimation { duration: 140 } }
+                }
+                Row {
+                  anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
+                  height: root.sp(4)
+                  Repeater { model: Model.ansi(cell.modelData); Rectangle { required property var modelData; width: cell.width / 6; height: root.sp(4); color: modelData } }
+                }
+                Text {
+                  anchors { left: parent.left; bottom: parent.bottom; leftMargin: root.sp(8); bottomMargin: root.sp(9) }
+                  text: cell.modelData.name
+                  textFormat: Text.PlainText
+                  color: cell.modelData.colors.foreground || "#fff"
+                  font.family: Style.fontFamily
+                  font.pixelSize: root.fz.caption
+                  style: Text.Outline
+                  styleColor: Util.alpha(cell.modelData.colors.background || "#000", 0.9)
+                }
+                // A hairline, never an accent border: the gate does the marking,
+                // so the live card can keep its artwork unframed.
+                Rectangle {
+                  anchors.fill: parent
+                  color: "transparent"
+                  border.width: 1
+                  border.color: Util.alpha(cell.modelData.colors.foreground || "#fff", cell.selected ? 0.3 : 0.18)
+                }
               }
             }
             MouseArea {
@@ -980,12 +1020,54 @@ Item {
           }
         }
 
-        // Edge fades and the playhead.
+        // Edge fades.
         Rectangle { anchors { left: parent.left; top: parent.top; bottom: parent.bottom } width: root.sp(140)
           gradient: Gradient { orientation: Gradient.Horizontal; GradientStop { position: 0; color: Util.alpha(root.bg, 0.9) } GradientStop { position: 1; color: Util.alpha(root.bg, 0) } } }
         Rectangle { anchors { right: parent.right; top: parent.top; bottom: parent.bottom } width: root.sp(140)
           gradient: Gradient { orientation: Gradient.Horizontal; GradientStop { position: 0; color: Util.alpha(root.bg, 0) } GradientStop { position: 1; color: Util.alpha(root.bg, 0.9) } } }
-        Rectangle { anchors.horizontalCenter: parent.horizontalCenter; y: -root.sp(4); width: root.sp(2); height: parent.height + root.sp(8); color: root.fg; opacity: 0.9 }
+
+        // The gate. The marker is fixed hardware and the film runs through it,
+        // which is the one arrangement that can't be misread as a divider
+        // between two cards. Corner brackets only, so nothing boxes in the
+        // candidate's artwork, in its own accent over a keyline of its own
+        // background — the colour guaranteed to separate that accent from the
+        // wallpaper behind it, including the themes whose accent is their
+        // foreground. Position and depth carry the marking; the accent is the
+        // part that is allowed to be weak.
+        Item {
+          id: gate
+          visible: root.rows.length > 0
+          width: Math.round(stripArea.thumbW * stripArea.liveScale) + root.sp(20)
+          height: Math.round(stripArea.thumbH * stripArea.liveScale) + root.sp(20)
+          x: Math.round((stripArea.width - width) / 2)
+          y: Math.round((stripArea.height - height) / 2) - stripArea.lift
+
+          readonly property int t: root.sp(2)
+          readonly property int armW: root.sp(26)
+          readonly property int armH: root.sp(18)
+          readonly property color keyline: Util.alpha(root.bg, 0.75)
+
+          Repeater {
+            model: 4
+            Item {
+              id: corner
+              required property int index
+              readonly property bool onRight: index === 1 || index === 3
+              readonly property bool onBottom: index > 1
+              readonly property int ax: onRight ? width - gate.t : 0
+              readonly property int ay: onBottom ? height - gate.t : 0
+              width: gate.armW
+              height: gate.armH
+              x: onRight ? gate.width - width : 0
+              y: onBottom ? gate.height - height : 0
+
+              Rectangle { x: -1; y: corner.ay - 1; width: corner.width + 2; height: gate.t + 2; color: gate.keyline }
+              Rectangle { x: corner.ax - 1; y: -1; width: gate.t + 2; height: corner.height + 2; color: gate.keyline }
+              Rectangle { x: 0; y: corner.ay; width: corner.width; height: gate.t; color: root.accent }
+              Rectangle { x: corner.ax; y: 0; width: gate.t; height: corner.height; color: root.accent }
+            }
+          }
+        }
 
         MouseArea {
           anchors.fill: parent
