@@ -382,11 +382,26 @@ Item {
       if (!path) continue
       var at = s.indexOf(path)
       if (at === -1) {
-        // Evict the slot that is neither wanted nor recently used.
-        var victim = -1, oldest = Infinity
-        for (var i = 0; i < s.length; i++) {
+        // Evict the slot that is neither wanted, nor on screen, nor recently
+        // used. "On screen" has to be part of it: a slot keeps painting for up
+        // to fadeDelayMs + fadeMs after it stops being the outgoing side of a
+        // wipe, and reusing it inside that window swaps the picture under a
+        // running fade — so you watch a theme two places away fade out, having
+        // never selected it.
+        var victim = -1, oldest = Infinity, i
+        for (i = 0; i < s.length; i++) {
           if (want.indexOf(s[i]) !== -1) continue
+          if (s[i] && (s[i] === shownKey || s[i] === wipeFrom)) continue
           if (age[i] < oldest) { oldest = age[i]; victim = i }
+        }
+        // Nothing spare: take the oldest unwanted one even if it is still
+        // fading, rather than leaving the selected background unstaged.
+        if (victim === -1) {
+          oldest = Infinity
+          for (i = 0; i < s.length; i++) {
+            if (want.indexOf(s[i]) !== -1) continue
+            if (age[i] < oldest) { oldest = age[i]; victim = i }
+          }
         }
         if (victim === -1) break
         s[victim] = path
