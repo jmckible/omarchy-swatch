@@ -57,6 +57,59 @@ vips_to() {
   if [[ -s $tmp ]]; then mv -f -- "$tmp" "$out"; else rm -f -- "$tmp"; return 1; fi
 }
 
+# ffmpeg on one snapshot, bounded like vips is. The output is transcoded, not
+# copied: the shell must decode bytes our own encoder wrote, exactly as it
+# decodes our JPEGs and never a theme's PNG. A validated copy would still hand
+# a long-lived decoder attacker-shaped bytes, which is the thing the posture
+# exists to prevent — the ffprobe gate only decides whether to transcode.
+#
+# Audio, subtitles, data streams and metadata are dropped. A theme picker that
+# makes noise is a bug, and every stream not carried is a decoder not reached.
+video_to() {
+  local src=$1 out=$2 tmp
+  tmp=$(mktemp --suffix=.mp4 "$SWATCH_THUMBS/.tmp.XXXXXXXX") || return 1
+  ( ulimit -v 4194304 2>/dev/null; timeout --kill-after=5s 120s \
+      ffmpeg -nostdin -v error -y -threads 1 -i "$src" \
+        -an -sn -dn -map_metadata -1 \
+        -vf "scale=w='min(iw,$W)':h='min(ih,$H)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2" \
+        -c:v libx264 -preset veryfast -crf 26 -pix_fmt yuv420p -movflags +faststart \
+        -f mp4 -- "$tmp" ) 2>/dev/null
+  if [[ -s $tmp ]]; then mv -f -- "$tmp" "$out"; else rm -f -- "$tmp"; return 1; fi
+}
+
+# gen_video SRC KEY: the animated derivative, from one verified snapshot.
+# Same shape as gen(): read once through a descriptor, check the snapshot,
+# encode the snapshot, and remember a refusal by key.
+gen_video() {
+  local src=$1 key=$2 dir=$SWATCH_THUMBS
+  local out=$dir/vid-$key.mp4 reject=$dir/reject-$key snap probe fmt codec w h dur
+  [[ $key =~ ^[0-9a-f]{16}$ ]] || return 0
+  [[ -e $reject ]] && return 0
+  [[ -f $out ]] && return 0
+  command -v ffprobe >/dev/null && command -v ffmpeg >/dev/null || return 0
+  snap=$(mktemp "$snapdir/vid.XXXXXXXX") || return 0
+  if ! read_bounded "$src" "$MAX_VIDEO_BYTES" >"$snap"; then rm -f -- "$snap"; mark_reject "$reject"; return 0; fi
+  # ffprobe is a producer like every other: deadline, bounded output, and the
+  # answer is shape-checked rather than trusted.
+  probe=$(timeout 10s ffprobe -v error -select_streams v:0 \
+            -show_entries stream=codec_name,width,height -show_entries format=format_name,duration \
+            -of json -- "$snap" 2>/dev/null | head -c 65536)
+  read -r codec w h fmt dur < <(jq -r '
+      ((.streams // [])[0] // {}) as $s | (.format // {}) as $f
+      | "\($s.codec_name // "-") \($s.width // 0) \($s.height // 0) \($f.format_name // "-") \(($f.duration // "0") | tonumber? // 0 | floor)"
+    ' <<<"$probe" 2>/dev/null)
+  if [[ $fmt =~ $VIDEO_FORMATS && $codec =~ $VIDEO_CODECS ]] \
+     && [[ $w =~ ^[0-9]+$ && $h =~ ^[0-9]+$ && $dur =~ ^[0-9]+$ ]] \
+     && (( w > 0 && h > 0 && w <= MAX_VIDEO_WIDTH && h <= MAX_VIDEO_HEIGHT )) \
+     && (( dur > 0 && dur <= MAX_VIDEO_SECONDS )); then
+    video_to "$snap" "$out" || mark_reject "$reject"
+  else
+    mark_reject "$reject"
+  fi
+  rm -f -- "$snap"
+  return 0
+}
+
 # gen SRC KEY: both derivatives from one verified snapshot of SRC. Nothing is
 # ever decoded by pathname — not the theme file, not our own cache.
 gen() {
@@ -82,8 +135,9 @@ gen() {
   rm -f -- "$snap"
   return 0
 }
-export -f gen vips_to read_bounded mark_reject
+export -f gen gen_video vips_to video_to read_bounded mark_reject
 export SWATCH_READ_PY SWATCH_READ_PL SWATCH_THUMBS MAX_IMAGE_BYTES MAX_PIXELS LOADERS snapdir W H
+export MAX_VIDEO_BYTES MAX_VIDEO_SECONDS MAX_VIDEO_WIDTH MAX_VIDEO_HEIGHT VIDEO_FORMATS VIDEO_CODECS
 
 # Jobs: current theme first so the first open lands on a finished stage;
 # preview then backgrounds; one job per distinct image.
@@ -101,6 +155,22 @@ jq -r --arg cur "$current" '
   done |
   xargs -0 -r -n 2 -P "$PAR" bash -c 'gen "$1" "$2"' _
 
+# Animated backgrounds, after every still: a clip is a nicety and a transcode
+# is the most expensive thing here, so stills must never wait behind one. Same
+# ordering (current theme first) and the same dedupe by key.
+jq -r --arg cur "$current" '
+  (.themes | map(select(.name == $cur)) + map(select(.name != $cur)))[]
+  | [.bgVideos // [], .bgVideoKeys // []] | transpose[]
+  | select(.[0] != null and .[1] != null and .[0] != "" and .[1] != "")
+  | "\(.[0])\t\(.[1])"' <<<"$index" 2>/dev/null |
+  awk -F'\t' '!seen[$2]++' | head -n "$MAX_JOBS" |
+  while IFS=$'\t' read -r src key; do
+    [[ -f $SWATCH_THUMBS/vid-$key.mp4 ]] && continue
+    [[ -e $SWATCH_THUMBS/reject-$key ]] && continue
+    printf '%s\0%s\0' "$src" "$key"
+  done |
+  xargs -0 -r -n 2 -P "$PAR" bash -c 'gen_video "$1" "$2"' _
+
 # Stage copies are per size. The current size's files are touched each run; a
 # size nothing has used for 30 days (a monitor that is gone) is dropped, while
 # a docked/undocked one stays warm.
@@ -112,12 +182,13 @@ find "$SWATCH_THUMBS" -maxdepth 1 -type f -name 'stage-*.jpg' ! -name "*-${W}x${
 # collection instead of growing forever. Skipped on a partial index.
 [[ $(jq -r '.partial // false' <<<"$index") == true ]] && exit 0
 declare -A live=()
-while IFS= read -r k; do [[ $k =~ ^[0-9a-f]{16}$ ]] && live[$k]=1; done < <(jq -r '.themes[] | (.previewKey // ""), (.bgKeys // [])[]' <<<"$index")
+while IFS= read -r k; do [[ $k =~ ^[0-9a-f]{16}$ ]] && live[$k]=1; done < <(jq -r '.themes[] | (.previewKey // ""), (.bgKeys // [])[], ((.bgVideoKeys // [])[] | select(. != ""))' <<<"$index")
 find "$SWATCH_THUMBS" -mindepth 1 -maxdepth 1 -type f -print0 2>/dev/null | head -z -n 20000 |
   while IFS= read -r -d '' f; do
     b=${f##*/}
     case $b in
       bg-*.jpg)    k=${b#bg-}; k=${k%.jpg} ;;
+      vid-*.mp4)   k=${b#vid-}; k=${k%.mp4} ;;
       stage-*.jpg) k=${b#stage-}; k=${k%%-*} ;;
       reject-*)    k=${b#reject-} ;;
       *)           k="" ;;

@@ -1,8 +1,7 @@
 # Animated backgrounds
 
-Not implemented here. This is the model to build against; the attempt on
-`origin/video` (`7f61216`, built on `fbe45f7`) is an older, different model and
-should not be revived as-is.
+The attempt on `origin/video` (`7f61216`, built on `fbe45f7`) is an older,
+different model. Do not revive it; this is what replaced it and why.
 
 ## The model
 
@@ -58,7 +57,7 @@ plays them". That was a gate on the *intro* framing and does not bind this
 model; what remains blocking is `qt6-multimedia` below, which is ours to
 resolve rather than the shell's.
 
-## The real dependency is qt6-multimedia, not ffmpeg
+## qt6-multimedia is optional, by construction
 
 `MediaPlayer` lives in `qt6-multimedia`. Quickshell does **not** pull it:
 
@@ -67,9 +66,15 @@ quickshell → qt6-base, qt6-declarative, qt6-svg, qt6-wayland
 ```
 
 Nor does `omarchy` declare it. Where it is present it arrived via something
-unrelated (mpv, kdenlive), so it cannot be assumed. **This is the thing to
-settle before writing QML** — a `MediaPlayer` that silently no-ops on a machine
-without it is worse than no feature.
+unrelated (mpv, kdenlive), so it cannot be assumed — and `import QtMultimedia`
+is a hard error at component load, which would take the whole overlay down on a
+machine without it.
+
+Hence `VideoStage.qml`. It is the only file that imports QtMultimedia, and
+`Swatch.qml` reaches it through a `Loader`. A missing module lands that Loader
+in `Loader.Error` with a null `item`; every guard that reads `item` is then
+false and the picker shows stills. **Nothing else may import QtMultimedia** —
+doing so moves the failure back out into the overlay.
 
 ffprobe, by contrast, is free:
 
@@ -77,8 +82,9 @@ ffprobe, by contrast, is free:
 qt6-multimedia → qt6-multimedia-ffmpeg → ffmpeg
 ```
 
-Playback cannot exist without ffmpeg being installed, so the snapshot + probe
-gate costs no dependency beyond the one playback already forces.
+Playback cannot exist without ffmpeg installed, so the snapshot + probe gate
+costs no dependency beyond the one playback already forces. `thumbs.sh` still
+checks for both binaries and skips the clip rather than assuming.
 
 ## Security posture still applies
 
@@ -89,10 +95,19 @@ a theme file. A video is untrusted input exactly like an image, so it needs a
 it reaches `MediaPlayer`, and a `reject-<key>` marker when refused so it is not
 re-copied every open.
 
-Whether the cache holds a re-encoded derivative or the validated snapshot is
-open. A derivative costs an ffmpeg transcode in `thumbs.sh`, against a 600 s
-budget that currently assumes cheap `vipsthumbnail` calls; the snapshot costs a
-full-size copy per video. Neither is obviously right yet.
+The cache holds a **transcode, not a validated copy**. This is the one decision
+worth not reopening: a copy would still hand the shell's long-lived decoder
+attacker-shaped bytes, and ffprobe agreeing that a file looks like H.264 is not
+the same as the file being safe to decode. Re-encoding means the bytes the
+shell decodes were written by our encoder, which is exactly the guarantee the
+JPEG path already gives. The probe only decides *whether to transcode*.
+
+Audio, subtitles, data streams and metadata are dropped at that transcode. A
+theme picker that makes noise is a bug, and every stream not carried is a
+decoder never reached.
+
+The transcode runs after every still, so a clip can never delay a wallpaper,
+and the 600 s budget still holds: eight 720p clips take about 1.5 s wall.
 
 ## Index shape
 
@@ -106,10 +121,13 @@ bgVideos:    [ ".../3-sunset-lake.mp4",  ".../5-oma-cityscape.mp4", ... ]
 ```
 
 Empty string where a background has no animated alternative. Nothing is removed
-from `backgrounds`, which is the point.
+from `backgrounds`, which is the point — and position *is* the pairing, so a
+still-only background must leave a blank rather than being skipped. Skipping
+would slide every later clip onto the wrong wallpaper. `videoKeyAt` and the
+hostile suite both pin this.
 
-Bump the `echo vN` line in `sig()` when this lands — that is what invalidates
-cached records.
+`sig()` is at `v7` for this shape; bump it whenever `resolve()`'s record
+changes.
 
 ## Direction: which end holds the still
 
@@ -149,14 +167,20 @@ clip start seamlessly. Whether that is usable is content-dependent: a camera
 push reversed is a pull and reads fine, but `last-horizon`'s wordmark would
 un-assemble.
 
-## Open question
+## When a clip starts
 
-Whether the video starts the moment a background is selected, or only after a
-dwell. Scrubbing lands a new background every ~160 ms; starting playback on each
-would thrash the decoder and show nothing legible. Direction bears on this:
-DEPART clips bloom out of the still already on screen and suit dwell, while
-ARRIVE clips are shaped as landings and may belong on apply rather than on
-scrub.
+On a dwell, not on landing: scrubbing lands a background every ~160 ms, and
+starting a decode on each would thrash for nothing anyone could see. `Timer`
+`videoDwell` (420 ms) arms it, every move disarms it, and `applying` kills it —
+a clip still running under the exit defocus would be motion inside the blur.
+
+It plays once and holds on its final frame rather than looping. Four of the
+eight clips are ARRIVE, so their final frame *is* the still: holding there is
+already the right resting state, and the hand-off back is a no-op. A loop would
+jump-cut exactly those four every time it wrapped.
+
+Still open: whether DEPART clips should loop instead, since they end away from
+their still and so have nowhere natural to rest.
 
 ## Test footage
 

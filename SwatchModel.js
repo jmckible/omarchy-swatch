@@ -100,11 +100,29 @@ function keyAt(theme, bgIndex) {
 function thumbPath(dir, key) { return dir && key ? dir + "/bg-" + key + ".jpg" : "" }
 function stagePath(dir, key, w, h) { return dir && key && w > 0 && h > 0 ? dir + "/stage-" + key + "-" + w + "x" + h + ".jpg" : "" }
 
+// The animated alternative of the background at bgIndex, or "" when that
+// background does not move. bgVideoKeys is parallel to backgrounds, with a
+// blank at every still-only position -- so a miss is a blank entry, not a
+// short array, and the index is never shifted by earlier misses.
+function videoKeyAt(theme, bgIndex) {
+  if (!theme) return ""
+  var keys = theme.bgVideoKeys || []
+  if (keys.length === 0) return ""
+  var i = clamp(bgIndex, keys.length)
+  return i === -1 ? "" : (keys[i] || "")
+}
+
+function videoPath(dir, key) { return dir && key ? dir + "/vid-" + key + ".mp4" : "" }
+
+// Whether a background has an animated alternative at all. The QML asks this
+// before arming the dwell timer, so a still-only background costs nothing.
+function hasVideo(theme, bgIndex) { return videoKeyAt(theme, bgIndex) !== "" }
+
 function ansi(theme) {
   var c = theme && theme.colors ? theme.colors : {}
   return [c.red, c.yellow, c.green, c.cyan, c.blue, c.magenta].map(function(x) { return x || "#808080" })
 }
 
 if (typeof module !== "undefined") {
-  module.exports = { matches: matches, filter: filter, nextMode: nextMode, indexOf: indexOf, findByName: findByName, clamp: clamp, wrap: wrap, backgroundAt: backgroundAt, backgroundIndexOf: backgroundIndexOf, keyAt: keyAt, thumbPath: thumbPath, stagePath: stagePath, ansi: ansi, MODES: MODES }
+  module.exports = { matches: matches, filter: filter, nextMode: nextMode, indexOf: indexOf, findByName: findByName, clamp: clamp, wrap: wrap, backgroundAt: backgroundAt, backgroundIndexOf: backgroundIndexOf, keyAt: keyAt, thumbPath: thumbPath, stagePath: stagePath, videoKeyAt: videoKeyAt, videoPath: videoPath, hasVideo: hasVideo, ansi: ansi, MODES: MODES }
 }

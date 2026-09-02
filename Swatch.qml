@@ -100,6 +100,16 @@ Item {
   readonly property var selected: (selectedIndex >= 0 && selectedIndex < rows.length) ? rows[selectedIndex] : null
   readonly property string selectedBackground: Model.backgroundAt(selected, bgIndex)
   readonly property string selectedKey: Model.keyAt(selected, bgIndex)
+
+  // Animated backgrounds. The clip is armed on a dwell rather than on landing:
+  // scrubbing lands a background every ~160 ms, and starting a decode on each
+  // one would thrash for nothing you could see. Only the background you stop
+  // on comes alive. videoArmed is cleared by every move, so the timer is
+  // effectively restarted by scrubbing rather than accumulating.
+  readonly property string selectedVideoKey: Model.videoKeyAt(selected, bgIndex)
+  readonly property bool videoAvailable: selectedVideoKey !== "" && !applying && opened
+  property bool videoArmed: false
+  readonly property int videoDwellMs: 420
   readonly property var ansi: Model.ansi(selected)
   readonly property color bg: selected ? selected.colors.background || "#101315" : "#101315"
   readonly property color fg: selected ? selected.colors.foreground || "#cacccc" : "#cacccc"
@@ -254,7 +264,32 @@ Item {
     scrubAxis = axis
     scrubDir = dir
     scrubQuick = wiping
+    disarmVideo()
   }
+
+  // Any movement kills the clip immediately. Letting it run under a wipe would
+  // put motion behind the mask that the wipe is trying to reveal past.
+  function disarmVideo() {
+    videoArmed = false
+    videoDwell.stop()
+    if (videoAvailable) videoDwell.restart()
+  }
+
+  Timer {
+    id: videoDwell
+    interval: root.videoDwellMs
+    onTriggered: if (root.videoAvailable) root.videoArmed = true
+  }
+
+  // Every route to a different background ends here, not just the arrow keys:
+  // filtering and the landing on open change the selection without going
+  // through noteMove, and each of those should re-start the dwell too.
+  onSelectedVideoKeyChanged: disarmVideo()
+
+  // The exit owns the screen from the moment Enter is pressed. A clip still
+  // running under the defocus would be motion inside the blur, and the lift
+  // resolves back to a still desktop that has no video in it.
+  onApplyingChanged: if (applying) { videoArmed = false; videoDwell.stop() }
 
   function setFilter(text) { scrubQuick = true; filterText = text; rebuild(false) }
   function cycleMode() { scrubQuick = true; modeFilter = Model.nextMode(modeFilter); rebuild(false) }
@@ -666,6 +701,38 @@ Item {
               sourceSize: Qt.size(root.stageW, root.stageH)
               cache: false
             }
+          }
+        }
+
+        // The animated alternative, sitting over the still it belongs to.
+        //
+        // It fades rather than cuts only because the clip may not open on the
+        // frame the still shows: where it does — an ARRIVE clip held on its
+        // final frame — the cross-fade is a no-op between identical pictures,
+        // which is the intended cheap case. The wipe and the exit blackout
+        // already cover the seams at either end of a scrub, so nothing here
+        // needs to coordinate with them beyond getting out of the way.
+        //
+        // Loaded whenever the overlay is open, not when a clip is wanted, so
+        // the first dwell does not pay for component creation. On a machine
+        // without qt6-multimedia this Loader lands in Loader.Error and `item`
+        // stays null — every guard below is false and the picker shows stills.
+        Loader {
+          id: videoLoader
+          anchors.fill: parent
+          z: 2
+          active: root.opened
+          asynchronous: true
+          source: "VideoStage.qml"
+          opacity: (status === Loader.Ready && item && item.showing) ? 1 : 0
+          visible: opacity > 0
+          Behavior on opacity { NumberAnimation { duration: 260; easing.type: Easing.InOutQuad } }
+          onLoaded: {
+            item.source = Qt.binding(function() {
+              return Util.fileUrl(Model.videoPath(root.thumbsDir, root.selectedVideoKey))
+            })
+            item.active = Qt.binding(function() { return root.videoArmed && root.videoAvailable })
+            item.failed.connect(function() { root.videoArmed = false })
           }
         }
       }

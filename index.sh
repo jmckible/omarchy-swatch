@@ -40,6 +40,7 @@ if p=$(read_bounded "$index" "$MAX_INDEX_BYTES") && jq -e '.themes | type == "ar
 fi
 
 image_find=(-type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.webp' -o -iname '*.gif' \))
+video_find=(-type f \( -iname '*.mp4' -o -iname '*.webm' -o -iname '*.mkv' \))
 
 # Inventory filter, advisory only: a directory entry is listed when it is a
 # regular non-symlink file with a bounded path that resolves under one of
@@ -61,7 +62,7 @@ safe_file() {
 sig() {
   local d=$1 f
   {
-    echo v6   # record schema version: bump when resolve() output changes
+    echo v7   # record schema version: bump when resolve() output changes
     stat -Lc '%Y' -- "$d"
     [[ -d $d/backgrounds ]] && stat -c 'bg:%Y' -- "$d/backgrounds"
     [[ -d $user_bgs/${d##*/} ]] && stat -c 'ubg:%Y' -- "$user_bgs/${d##*/}"
@@ -74,10 +75,10 @@ sig() {
 # Files directly inside a directory: no symlinks followed, at most
 # MAX_DIR_ENTRIES readdir entries considered, sorted, filtered, capped.
 list_files() {
-  local dir=$1 max=$2; shift 2
+  local dir=$1 max=$2 bytes=${LIST_BYTES:-$MAX_IMAGE_BYTES}; shift 2
   [[ -d $dir ]] || return 0
   find -H "$dir" -mindepth 1 -maxdepth 1 "$@" -print0 2>/dev/null | head -z -n "$MAX_DIR_ENTRIES" | sort -z |
-    while IFS= read -r -d '' f; do safe_file "$f" "$MAX_IMAGE_BYTES" && printf '%s\n' "$f"; done | head -n "$max"
+    while IFS= read -r -d '' f; do safe_file "$f" "$bytes" && printf '%s\n' "$f"; done | head -n "$max"
 }
 
 # One cache key per image, from its path and stat, so a replaced file gets
@@ -100,7 +101,7 @@ stage_size() {
 
 resolve() {
   local path=$1 src=$2 name=${1##*/}
-  local real s colors=/dev/null shell=/dev/null preview="" pkey="" bgs bgkeys="" b pal n
+  local real s colors=/dev/null shell=/dev/null preview="" pkey="" bgs bgkeys="" bgvids="" b pal n
   real=$(realpath -e -- "$path" 2>/dev/null) || return 0
   ALLOWED_ROOTS=("$real" "$(realpath -e -- "$user_bgs/$name" 2>/dev/null || true)")
   s=$(sig "$path")
@@ -128,6 +129,28 @@ resolve() {
   [[ -n $preview ]] && pkey=$(image_key "$preview")
   while IFS= read -r b; do [[ -n $b ]] && bgkeys+="$(image_key "$b")"$'\n'; done <<<"$bgs"
 
+  # Animated backgrounds: a clip is an alternative rendering of the background
+  # sharing its stem, so it is discovered per background rather than per theme.
+  # Same two dirs and the same order, so a user clip shadows a theme's own.
+  # One line per background, empty where there is no clip — position is the
+  # pairing, which is why these are not filtered like $bgs is.
+  local vids vkeys="" vk v bstem vstem
+  vids=$( { LIST_BYTES=$MAX_VIDEO_BYTES list_files "$user_bgs/$name" "$MAX_BACKGROUNDS" "${video_find[@]}"
+            LIST_BYTES=$MAX_VIDEO_BYTES list_files "$path/backgrounds" "$MAX_BACKGROUNDS" "${video_find[@]}"; } \
+          | head -n "$MAX_BACKGROUNDS" )
+  while IFS= read -r b; do
+    [[ -n $b ]] || continue
+    bstem=${b##*/}; bstem=${bstem%.*}
+    # First clip whose stem matches wins, preserving user-dir-first order.
+    vk=$(while IFS= read -r v; do
+           [[ -n $v ]] || continue
+           vstem=${v##*/}; vstem=${vstem%.*}
+           [[ $vstem == "$bstem" ]] && { printf '%s' "$v"; break; }
+         done <<<"$vids")
+    bgvids+="$vk"$'\n'
+    if [[ -n $vk ]]; then vkeys+="$(image_key "$vk")"$'\n'; else vkeys+=$'\n'; fi
+  done <<<"$bgs"
+
   # Palette via omarchy-theme-color, so legacy keys and aliases match what
   # theme-set produces: under a deadline, and a ceiling that refuses rather
   # than truncates. Values are shaped to hex colours before they reach QML.
@@ -136,6 +159,7 @@ resolve() {
 
   jq -n --arg name "$name" --arg src "$src" --arg path "$path" --arg sig "$s" \
     --arg preview "$preview" --arg previewKey "$pkey" --arg bgs "$bgs" --arg bgkeys "$bgkeys" \
+    --arg bgvids "$bgvids" --arg vkeys "$vkeys" \
     --arg pal "$pal" --rawfile colors "$colors" --rawfile shell "$shell" '
     def hex: if type == "string" and test("^#[0-9a-fA-F]{6}([0-9a-fA-F]{2})?$") then . else null end;
     ($pal | split("\n") | map(select(length > 0 and length <= 256) | split("\t") | select(length >= 2) | {(.[0]): .[1]}) | add // {}) as $c
@@ -147,6 +171,11 @@ resolve() {
         preview: $preview, previewKey: $previewKey,
         backgrounds: ($bgs | split("\n") | map(select(length > 0))),
         bgKeys: ($bgkeys | split("\n") | map(select(length > 0))),
+        # Parallel to backgrounds, empty where a background does not move.
+        # Trailing "" from the final newline is dropped, never the interior
+        # blanks — those are the pairing.
+        bgVideos: ($bgvids | split("\n") | .[:-1]),
+        bgVideoKeys: ($vkeys | split("\n") | .[:-1]),
         colorsToml: $colors, shellToml: $shell }'
 }
 

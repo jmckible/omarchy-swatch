@@ -76,4 +76,31 @@ assert.equal(Model.stagePath("/c", "1111111111111111", 2560, 1440), "/c/stage-11
 assert.equal(Model.stagePath("/c", "", 2560, 1440), "")
 assert.equal(Model.stagePath("/c", "1111111111111111", 0, 1440), "")
 
+// Animated backgrounds. bgVideoKeys is parallel to backgrounds with a blank
+// wherever a background is still-only, so position is the pairing: a miss at
+// index 0 must not shift index 1's clip onto index 0.
+const V = { name: "gruvbox", label: "Gruvbox", mode: "dark", source: "stock",
+  backgrounds: ["/b/1.jpg", "/b/2.jpg", "/b/3.jpg"],
+  bgKeys: ["1111111111111111", "2222222222222222", "3333333333333333"],
+  bgVideos: ["", "/b/2.mp4", ""],
+  bgVideoKeys: ["", "2222222222222222", ""] }
+
+assert.equal(Model.videoKeyAt(V, 1), "2222222222222222")
+assert.equal(Model.videoKeyAt(V, 0), "")
+assert.equal(Model.videoKeyAt(V, 2), "")
+assert.equal(Model.hasVideo(V, 1), true)
+assert.equal(Model.hasVideo(V, 0), false)
+// Out-of-range clamps like keyAt does, rather than returning undefined.
+assert.equal(Model.videoKeyAt(V, 99), "")
+assert.equal(Model.videoKeyAt(V, -5), "")
+// A theme predating the field, and no theme at all.
+assert.equal(Model.videoKeyAt(T[0], 0), "")
+assert.equal(Model.hasVideo(T[0], 0), false)
+assert.equal(Model.videoKeyAt(null, 0), "")
+assert.equal(Model.hasVideo(null, 0), false)
+
+assert.equal(Model.videoPath("/c", "2222222222222222"), "/c/vid-2222222222222222.mp4")
+assert.equal(Model.videoPath("/c", ""), "")
+assert.equal(Model.videoPath("", "2222222222222222"), "")
+
 console.log("ok")

@@ -20,6 +20,19 @@ MAX_INDEX_BYTES=8388608     # an index.json above this is refused, not parsed
 LOADERS='^(jpegload|pngload|webpload|gifload)$'
 NAME_RE='^[A-Za-z0-9][A-Za-z0-9._-]*$'
 
+# Animated backgrounds. A clip is a wallpaper that moves, so it is bounded like
+# one and then some: it is handed to a decoder that runs for as long as the
+# preview is open, not for the length of one thumbnail call. The ceilings are
+# producer-side, checked on the snapshot, before MediaPlayer ever sees a path.
+MAX_VIDEO_BYTES=134217728   # 128 MB — yamz8's 720p teasers are 0.6–1.3 MB
+MAX_VIDEO_SECONDS=120       # a background that moves, not a film
+MAX_VIDEO_WIDTH=7680
+MAX_VIDEO_HEIGHT=4320
+# ffprobe format/codec allowlist. Containers ffmpeg reports as a comma list,
+# matched whole — "mov,mp4,m4a,3gp,3g2,mj2" is one string, not six.
+VIDEO_FORMATS='^(mov,mp4,m4a,3gp,3g2,mj2|matroska,webm)$'
+VIDEO_CODECS='^(h264|hevc|vp8|vp9|av1)$'
+
 SWATCH_CACHE=${XDG_CACHE_HOME:-$HOME/.cache}/omarchy/swatch
 SWATCH_THUMBS=$SWATCH_CACHE/thumbs
 SWATCH_INDEX=$SWATCH_CACHE/index.json
