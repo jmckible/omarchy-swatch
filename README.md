@@ -2,7 +2,7 @@
 
 A theme picker for [Omarchy](https://omarchy.org) that tries the theme on.
 
-The candidate's wallpaper fills the screen. The shell — bar, menus, notifications, the picker itself — retints to its palette as you scrub. The only chrome that isn't the theme is a filmstrip under a fixed playhead.
+The candidate's wallpaper fills the screen, edge to edge. The shell — bar, menus, notifications, the picker itself — retints to its palette as you scrub, so what you land on is already wearing the theme. The only chrome that isn't the theme is a filmstrip under a fixed playhead.
 
 Built to stay instant at any collection size: an incremental index of every `colors.toml`, cards painted from the palette before any image decodes, a recycled filmstrip, and at most five screen-size wallpapers resident at once.
 

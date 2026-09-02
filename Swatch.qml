@@ -160,15 +160,6 @@ Item {
   readonly property int metaPx: Math.round(root.fz.body * k)
   readonly property int samplePx: Math.round(root.fz.subtitle * k)
 
-  readonly property string barPosition: shell && shell.bar && shell.bar.position ? shell.bar.position : "top"
-  readonly property int barSize: shell && shell.bar && shell.bar.barSize ? shell.bar.barSize : 0
-  // The carve-out below is only honest while the bar paints its own background.
-  // A transparent bar is a hole onto the wallpaper we are leaving; a hidden bar
-  // is a hole onto nothing. Either way the band shows the old theme hard against
-  // the candidate's, so cover it and let the scrim run to the screen edge.
-  readonly property bool barOpaque: !!(shell && shell.bar) && !shell.bar.transparent && !shell.bar.barHidden
-  readonly property int barInset: barOpaque ? barSize : 0
-
   // Stage copies are made at the largest monitor's physical size, measured by
   // index.sh. The shell never decodes a theme's own file; everything it shows
   // is a derivative from our cache.
@@ -620,16 +611,22 @@ Item {
 
     readonly property real dpr: screen ? screen.devicePixelRatio : 1
 
-    // Everything lives inside this item, which leaves the band where the real
-    // bar sits unpainted — so the bar you see retinting is the actual bar. Only
-    // while that band is opaque: see barInset.
+    // Full screen, bar band included. This used to carve out the bar's band so
+    // the real bar showed through and retinted live — Swatch sits on
+    // WlrLayer.Overlay, above the bar's Top, so a hole was the only way to see
+    // it. But the carve-out is only honest when the bar paints that whole band,
+    // and nothing Swatch can read says whether it does: shell.bar exposes
+    // position, size, transparent and hidden, not what is actually painted. A
+    // bar that fills its window only partly — a floating pill in a transparent
+    // band, say — turned the rest of the band into a hole onto the wallpaper
+    // being left, showing the old theme hard against the candidate's.
+    //
+    // So the wallpaper now runs to every edge and no bar is previewed. That
+    // loses the live retint, which was a real thing to give up; it buys a stage
+    // with no geometry that depends on another plugin's internals.
     Item {
       id: stage
       anchors.fill: parent
-      anchors.topMargin: root.barPosition === "top" ? root.barInset : 0
-      anchors.bottomMargin: root.barPosition === "bottom" ? root.barInset : 0
-      anchors.leftMargin: root.barPosition === "left" ? root.barInset : 0
-      anchors.rightMargin: root.barPosition === "right" ? root.barInset : 0
       clip: true
 
       // Only live during the exit: a layer on a screen-size item costs a render
@@ -645,16 +642,15 @@ Item {
 
       Rectangle { anchors.fill: parent; color: root.bg }
 
-      // Screen geometry, not stage geometry. The stage is inset by the bar's
-      // band, and PreserveAspectCrop fits the image to whatever rect it is
-      // given — so fitting it here would crop it differently from the desktop
-      // underneath, and the hand-off at the end of the exit would snap by about
-      // half a bar height. Fill the panel and let the stage's clip keep it out
-      // of the bar band instead, so both sides frame the picture identically.
+      // Screen geometry, which the stage now also has. PreserveAspectCrop fits
+      // the image to whatever rect it is handed, so this has to be the same
+      // rect the desktop's own wallpaper is fitted to or the preview frames
+      // every wallpaper slightly differently from the thing it is previewing —
+      // and the hand-off at the end of the exit snaps. Kept explicit rather
+      // than anchored to the stage so that stays true if the stage is ever
+      // inset again.
       Item {
         id: wallpaperLayer
-        x: root.barPosition === "left" ? -root.barInset : 0
-        y: root.barPosition === "top" ? -root.barInset : 0
         width: panel.width
         height: panel.height
 
@@ -1355,8 +1351,9 @@ Item {
       }
     }
 
-    // Outside the stage, so the black takes the bar's band too: a cut should be
-    // a cut, not a dark screen with a lit strip along one edge.
+    // Outside the stage so it is unaffected by the stage's blur layer: the
+    // black is the cut itself, not something being defocused along with the
+    // picture underneath it.
     Rectangle {
       anchors.fill: parent
       color: "black"
