@@ -8,8 +8,8 @@ Built to stay instant at any collection size: an incremental index of every `col
 
 Plugin id `jmckible.swatch`. MIT. Not affiliated with Omarchy or 37signals.
 
-<p align="center"><img src="docs/screenshots/demo.gif" alt="Scrubbing through themes full-screen, then a theme intro clip settling into its wallpaper" width="900"></p>
-<p align="center"><sub>The intro clip at the end is a preview of video backgrounds, coming with Omarchy 4.1 (<a href="https://x.com/yamzeight/status/2089340897326469186">teaser footage by @yamzeight</a>, not included in this repo). That work lives on the <a href="https://github.com/jmckible/omarchy-swatch/tree/video"><code>video</code> branch</a> until the shell settles how it plays them; this release previews stills.</sub></p>
+<p align="center"><img src="docs/screenshots/demo.gif" alt="Scrubbing through themes full-screen, then an animated background settling into its still" width="900"></p>
+<p align="center"><sub>The clip at the end previews animated backgrounds — a wallpaper with a moving version of itself (<a href="https://x.com/yamzeight/status/2089340897326469186">teaser footage by @yamzeight</a>, not included in this repo). Designed but not built: see <a href="docs/animated-backgrounds.md">docs/animated-backgrounds.md</a>. This release previews stills.</sub></p>
 
 | Preview | Backgrounds | Filter |
 |---|---|---|
@@ -59,7 +59,7 @@ theme=$(~/.config/omarchy/plugins/jmckible.swatch/pick.sh) && omarchy theme set 
 - `thumbs.sh` makes, for every wallpaper the index names, a stage copy at your largest monitor's size (never upscaled) and a 640×360 filmstrip thumb. It runs on every open and does nothing when nothing is missing. The shell shows only these copies — it never opens a theme's own image file — which is also why webp wallpapers preview without `qt6-imageformats`.
 - Live preview is the same call `omarchy theme set` makes over IPC (`shell applyTheme`) — shell-only, reverted on cancel, never written to disk. Terminal palettes and Hyprland borders change on apply, not during preview.
 - Themes are treated as untrusted input. Every theme file the plugin reads is opened exactly once, without following symlinks, and verified on that descriptor (regular file, size ceiling, inside the theme's directory) before its bytes go anywhere; a file that grows past the ceiling is refused, not truncated. Images are decoded only from such a snapshot, single-threaded under a timeout and memory limit, at most four at a time, after a header check (loader allowlist, 50 MP). Ceilings: 32 KB TOML, 64 MB images, 200 backgrounds, 512 themes, 8 MB index. Writes go only to `~/.cache/omarchy/swatch/`, through exclusively created temp files.
-- Video intros (`backgrounds/foo.mp4` playing once when you land on a theme) live on the [`video` branch](https://github.com/jmckible/omarchy-swatch/tree/video) until Omarchy 4.1 settles how the shell plays them.
+- Animated backgrounds — a wallpaper that also ships a moving version of itself, `3-sunset-lake.webp` alongside `3-sunset-lake.mp4`, played while you preview that background — are designed but not built: see [docs/animated-backgrounds.md](docs/animated-backgrounds.md). An earlier take that treated the clip as one intro per theme lives on the [`video` branch](https://github.com/jmckible/omarchy-swatch/tree/video).
 
 ## Remove
 
