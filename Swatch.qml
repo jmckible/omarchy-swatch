@@ -269,10 +269,19 @@ Item {
 
   // Any movement kills the clip immediately. Letting it run under a wipe would
   // put motion behind the mask that the wipe is trying to reveal past.
+  //
+  // The condition is spelled out rather than reading videoAvailable, and that
+  // is not a style choice. This runs from onSelectedVideoKeyChanged, where the
+  // key itself is already current but every binding *derived* from it — which
+  // videoAvailable is — has not been re-evaluated yet. Reading it here gets
+  // the previous value, so arming would be inverted: a background that has a
+  // clip would see the old `false` and never start the timer, while one that
+  // does not would see the old `true` and start a useless one. The raw
+  // properties are all current.
   function disarmVideo() {
     videoArmed = false
     videoDwell.stop()
-    if (videoAvailable) videoDwell.restart()
+    if (selectedVideoKey !== "" && !applying && opened) videoDwell.restart()
   }
 
   Timer {

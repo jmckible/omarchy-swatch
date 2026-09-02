@@ -167,6 +167,29 @@ clip start seamlessly. Whether that is usable is content-dependent: a camera
 push reversed is a pull and reads fine, but `last-horizon`'s wordmark would
 un-assemble.
 
+## The binding-order trap
+
+Three separate bugs while wiring this up were all one mistake, so it is worth
+naming: **inside a change handler, a property derived from the thing that
+changed still holds its previous value.** The raw property is current; bindings
+that depend on it have not re-evaluated yet.
+
+It is nasty because it inverts behaviour rather than breaking it. `disarmVideo`
+read `videoAvailable` — derived from `selectedVideoKey` — from inside
+`onSelectedVideoKeyChanged`. Landing on a background *with* a clip read the
+stale `false` and never armed; leaving one read the stale `true` and armed a
+timer that fired against an empty key. Exactly backwards, and silent.
+
+The same shape hid one level down in `VideoStage`. `player.source` is bound to
+`active`, so `play()` from `onActiveChanged` ran against the old empty source
+and did nothing; the clip then sat loaded on frame 0. For a DEPART clip frame 0
+*is* its still, so the symptom was a picture identical to the working one — the
+feature looked simply absent. `maybePlay()` is called from both sides and acts
+whenever the last of them arrives.
+
+The rule: in a handler, read raw properties, or move the decision into a
+binding or a timer that evaluates later. Both fixes here do the latter.
+
 ## When a clip starts
 
 On a dwell, not on landing: scrubbing lands a background every ~160 ms, and

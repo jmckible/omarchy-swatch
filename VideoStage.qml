@@ -39,8 +39,11 @@ Item {
     // eight clips end exactly on their still, so holding there is already the
     // right resting state and the hand-off back to the still is a no-op. A
     // loop would instead jump-cut those four every time it wrapped.
-    onMediaStatusChanged: if (mediaStatus === MediaPlayer.InvalidMedia) stage.failed()
-    onErrorOccurred: stage.failed()
+    onMediaStatusChanged: {
+      if (mediaStatus === MediaPlayer.InvalidMedia) stage.failed()
+      else stage.maybePlay()   // the side that usually arrives last
+    }
+    onErrorOccurred: function(err, str) { console.warn("swatch/video: error", err, str); stage.failed() }
   }
 
   VideoOutput {
@@ -50,8 +53,33 @@ Item {
     fillMode: VideoOutput.PreserveAspectCrop
   }
 
+  // Playback cannot be started from onActiveChanged. player.source is bound to
+  // `active`, so at the moment that handler runs the source is still the old
+  // "" — play() there is a no-op on empty media, and by the time the real
+  // source resolves and loads there is nothing left to start it. The clip then
+  // sits loaded on frame 0, which for a DEPART clip is pixel-identical to the
+  // still it belongs to: indistinguishable from the feature not working.
+  //
+  // So play when the media is actually ready, from whichever side arrives
+  // last. `started` keeps it to once: after EndOfMedia we hold the final
+  // frame rather than looping.
+  property bool started: false
+
+  function maybePlay() {
+    if (!active || started) return
+    if (player.mediaStatus === MediaPlayer.LoadedMedia
+        || player.mediaStatus === MediaPlayer.BufferedMedia) {
+      started = true
+      player.play()
+    }
+  }
+
+  // Never assign player.source here: it is bound to `active`, and an
+  // imperative write would replace that binding with a dead value, so the
+  // first disarm would silently kill every clip for the rest of the session.
+  // Clearing is what the binding already does when active goes false.
   onActiveChanged: {
-    if (active) player.play()
-    else { player.stop(); player.source = "" }
+    if (active) maybePlay()
+    else { player.stop(); started = false }
   }
 }
