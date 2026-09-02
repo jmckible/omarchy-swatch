@@ -132,14 +132,15 @@ changes.
 ## Direction: which end holds the still
 
 A clip meets its still at exactly one end, and which end is a property of the
-footage, not a convention we pick. Measured against yamz8's seven:
+footage, not a convention we pick. Measured against yamz8's eight:
 
 - **DEPART** — the still is frame 0; the clip moves away from it.
   `gruvbox/1-the-backwater` (3.58), `gruvbox/3-village-square` (2.58),
   `nord/1-city-view` (7.19).
 - **ARRIVE** — the still is the final frame; the clip lands on it.
-  `last-horizon/omarchy` (0.00), `tokyo-night/5-oma-cityscape` (3.63),
-  `retro-82/2-dusk-guardian` (4.88), `tokyo-night/3-sunset-lake` (5.42).
+  `last-horizon/omarchy` (0.00), `solitude/90-storm` (0.88),
+  `tokyo-night/5-oma-cityscape` (3.63), `retro-82/2-dusk-guardian` (4.88),
+  `tokyo-night/3-sunset-lake` (5.42).
 
 Scores are mean absolute difference of 64×36 signatures; a true match is under
 about 8, and the other end of the same clip scores 16–55. Detect it by comparing
@@ -197,7 +198,7 @@ starting a decode on each would thrash for nothing anyone could see. `Timer`
 `videoDwell` (420 ms) arms it, every move disarms it, and `applying` kills it —
 a clip still running under the exit defocus would be motion inside the blur.
 
-It plays once and holds on its final frame rather than looping. Four of the
+It plays once and holds on its final frame rather than looping. Five of the
 eight clips are ARRIVE, so their final frame *is* the still: holding there is
 already the right resting state, and the hand-off back is a no-op. A loop would
 jump-cut exactly those four every time it wrapped.

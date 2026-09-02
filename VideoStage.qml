@@ -35,10 +35,10 @@ Item {
     videoOutput: output
     audioOutput: null   // the derivative has no audio track; this is belt and braces
 
-    // Played once and held on the final frame, not looped. Four of yamz8's
+    // Played once and held on the final frame, not looped. Five of yamz8's
     // eight clips end exactly on their still, so holding there is already the
     // right resting state and the hand-off back to the still is a no-op. A
-    // loop would instead jump-cut those four every time it wrapped.
+    // loop would instead jump-cut those five every time it wrapped.
     onMediaStatusChanged: {
       if (mediaStatus === MediaPlayer.InvalidMedia) stage.failed()
       else stage.maybePlay()   // the side that usually arrives last
