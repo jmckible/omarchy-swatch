@@ -107,7 +107,7 @@ theme picker that makes noise is a bug, and every stream not carried is a
 decoder never reached.
 
 The transcode runs after every still, so a clip can never delay a wallpaper,
-and the 600 s budget still holds: eight 720p clips take about 1.5 s wall.
+and the 600 s budget still holds: eleven 720p clips take about 2 s wall.
 
 ## Index shape
 
@@ -132,15 +132,24 @@ changes.
 ## Direction: which end holds the still
 
 A clip meets its still at exactly one end, and which end is a property of the
-footage, not a convention we pick. Measured against yamz8's eight:
+footage, not a convention we pick. Measured against yamz8's eleven:
 
 - **DEPART** — the still is frame 0; the clip moves away from it.
-  `gruvbox/1-the-backwater` (3.58), `gruvbox/3-village-square` (2.58),
-  `nord/1-city-view` (7.19).
+  `gruvbox/3-village-square` (2.70), `solitude/BG1` (3.40),
+  `gruvbox/1-the-backwater` (3.73), `nord/1-city-view` (7.26).
 - **ARRIVE** — the still is the final frame; the clip lands on it.
-  `last-horizon/omarchy` (0.00), `solitude/90-storm` (0.88),
-  `tokyo-night/5-oma-cityscape` (3.63), `retro-82/2-dusk-guardian` (4.88),
-  `tokyo-night/3-sunset-lake` (5.42).
+  `last-horizon/omarchy` (0.00), `solitude/BG4` (1.80),
+  `solitude/BG2` (2.76), `solitude/BG5` (3.78),
+  `tokyo-night/5-oma-cityscape` (3.76), `retro-82/2-dusk-guardian` (5.03),
+  `tokyo-night/3-sunset-lake` (5.45).
+
+Measure **both ends against every wallpaper the theme ships**, not the end
+against a bundled still. `solitude/90-storm` was filed as ARRIVE onto a still
+of its own only because its last frame was compared to the poster that shipped
+with it; its first frame is `BG1` at 3.40, so it is DEPART from a wallpaper
+solitude already had, and the extra background was never needed. Only
+`last-horizon/omarchy` genuinely lands somewhere no theme ships — its best
+shipped match is 16.57, comfortably outside the threshold.
 
 Scores are mean absolute difference of 64×36 signatures; a true match is under
 about 8, and the other end of the same clip scores 16–55. Detect it by comparing
@@ -198,8 +207,8 @@ starting a decode on each would thrash for nothing anyone could see. `Timer`
 `videoDwell` (420 ms) arms it, every move disarms it, and `applying` kills it —
 a clip still running under the exit defocus would be motion inside the blur.
 
-It plays once and holds on its final frame rather than looping. Five of the
-eight clips are ARRIVE, so their final frame *is* the still: holding there is
+It plays once and holds on its final frame rather than looping. Seven of the
+eleven clips are ARRIVE, so their final frame *is* the still: holding there is
 already the right resting state, and the hand-off back is a no-op. A loop would
 jump-cut exactly those four every time it wrapped.
 

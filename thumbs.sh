@@ -49,12 +49,22 @@ mark_reject() { (set -C; : >"$1") 2>/dev/null; }
 
 # vips on one file, bounded: single-threaded, 2 GB address space, deadline.
 # vipsthumbnail exits 0 on unreadable input, so the output is what is checked.
+#
+# Exit 2 means "not this time": the deadline was hit, which says the machine
+# was busy, not that the file is bad. That distinction matters because a
+# refusal is remembered forever — see gen(). A wallpaper that timed out once
+# under load would otherwise lose its filmstrip thumb permanently, since its
+# key stays live and the sweep never revisits it.
 vips_to() {
-  local src=$1 size=$2 out=$3 q=$4 tmp
+  local src=$1 size=$2 out=$3 q=$4 tmp rc
   tmp=$(mktemp --suffix=.jpg "$SWATCH_THUMBS/.tmp.XXXXXXXX") || return 1
   ( ulimit -v 2097152 2>/dev/null; VIPS_CONCURRENCY=1 timeout --kill-after=2s 30s \
       vipsthumbnail "$src" --size "$size" --smartcrop=centre --no-rotate --path "$tmp[Q=$q,strip]" ) 2>/dev/null
-  if [[ -s $tmp ]]; then mv -f -- "$tmp" "$out"; else rm -f -- "$tmp"; return 1; fi
+  rc=$?
+  if [[ -s $tmp ]]; then mv -f -- "$tmp" "$out"; return 0; fi
+  rm -f -- "$tmp"
+  (( rc == 124 || rc == 137 )) && return 2   # deadline, or killed after it
+  return 1
 }
 
 # ffmpeg on one snapshot, bounded like vips is. The output is transcoded, not
@@ -68,13 +78,18 @@ vips_to() {
 video_to() {
   local src=$1 out=$2 tmp
   tmp=$(mktemp --suffix=.mp4 "$SWATCH_THUMBS/.tmp.XXXXXXXX") || return 1
+  local rc
   ( ulimit -v 4194304 2>/dev/null; timeout --kill-after=5s 120s \
       ffmpeg -nostdin -v error -y -threads 1 -i "$src" \
         -an -sn -dn -map_metadata -1 \
         -vf "scale=w='min(iw,$W)':h='min(ih,$H)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2" \
         -c:v libx264 -preset veryfast -crf 26 -pix_fmt yuv420p -movflags +faststart \
         -f mp4 -- "$tmp" ) 2>/dev/null
-  if [[ -s $tmp ]]; then mv -f -- "$tmp" "$out"; else rm -f -- "$tmp"; return 1; fi
+  rc=$?
+  if [[ -s $tmp ]]; then mv -f -- "$tmp" "$out"; return 0; fi
+  rm -f -- "$tmp"
+  (( rc == 124 || rc == 137 )) && return 2   # deadline: retry later, do not condemn the file
+  return 1
 }
 
 # gen_video SRC KEY: the animated derivative, from one verified snapshot.
@@ -102,7 +117,7 @@ gen_video() {
      && [[ $w =~ ^[0-9]+$ && $h =~ ^[0-9]+$ && $dur =~ ^[0-9]+$ ]] \
      && (( w > 0 && h > 0 && w <= MAX_VIDEO_WIDTH && h <= MAX_VIDEO_HEIGHT )) \
      && (( dur > 0 && dur <= MAX_VIDEO_SECONDS )); then
-    video_to "$snap" "$out" || mark_reject "$reject"
+    video_to "$snap" "$out"; local vrc=$?; (( vrc == 1 )) && mark_reject "$reject"
   else
     mark_reject "$reject"
   fi
@@ -126,9 +141,14 @@ gen() {
   if [[ $line =~ :\ ([0-9]+)x([0-9]+)\ [^,]+,\ [0-9]+\ bands?,\ [^,]+,\ ([a-z0-9]+)$ ]]; then
     w=${BASH_REMATCH[1]}; h=${BASH_REMATCH[2]}; loader=${BASH_REMATCH[3]}
   fi
+  # A marker is a statement about the file, so only a real refusal earns one:
+  # a header we do not accept, or a render that failed for a reason other than
+  # the deadline. A timeout (rc 2) leaves no marker and is simply retried on a
+  # later open, which is what makes a busy machine recoverable.
+  local rc
   if [[ $loader =~ $LOADERS ]] && (( w > 0 && h > 0 && w * h <= MAX_PIXELS )); then
-    [[ -f $stage ]] || vips_to "$snap" "${W}x${H}>" "$stage" 85 || mark_reject "$reject"
-    [[ -f $thumb ]] || vips_to "$snap" 640x360 "$thumb" 80 || mark_reject "$reject"
+    if [[ ! -f $stage ]]; then vips_to "$snap" "${W}x${H}>" "$stage" 85; rc=$?; (( rc == 1 )) && mark_reject "$reject"; fi
+    if [[ ! -f $thumb ]]; then vips_to "$snap" 640x360 "$thumb" 80; rc=$?; (( rc == 1 )) && mark_reject "$reject"; fi
   else
     mark_reject "$reject"
   fi
