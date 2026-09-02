@@ -53,6 +53,9 @@ Item {
   property string scrubAxis: "theme"
   property int scrubDir: 1
   property bool scrubArmed: false
+  // True from open() until the first wallpaper has actually been shown, so
+  // that one hand-off is a cut rather than a transition. See the slot Behavior.
+  property bool landing: false
   property bool scrubQuick: false   // already mid-wipe: don't queue another
 
   // A luma wipe: one greyscale map, one threshold swept across it. The map is
@@ -101,15 +104,25 @@ Item {
   readonly property string selectedBackground: Model.backgroundAt(selected, bgIndex)
   readonly property string selectedKey: Model.keyAt(selected, bgIndex)
 
-  // Animated backgrounds. The clip is armed on a dwell rather than on landing:
-  // scrubbing lands a background every ~160 ms, and starting a decode on each
-  // one would thrash for nothing you could see. Only the background you stop
-  // on comes alive. videoArmed is cleared by every move, so the timer is
-  // effectively restarted by scrubbing rather than accumulating.
+  // Animated backgrounds. The clip loads as soon as a background is selected,
+  // so playback can begin while the wipe that revealed it is still running —
+  // it is not a dwell you wait out. That matters most for an ARRIVE clip,
+  // whose still IS its final frame: wait, and you are shown the ending before
+  // the animation starts from the beginning.
+  //
+  // The delay is only a debounce, sized to outlast key auto-repeat (~40 ms) so
+  // a held arrow never loads anything, while a deliberate landing loads at
+  // once. It is far below wipeMs, so by the time the wipe finishes the clip is
+  // usually already moving.
   readonly property string selectedVideoKey: Model.videoKeyAt(selected, bgIndex)
   readonly property bool videoAvailable: selectedVideoKey !== "" && !applying && opened
+  // Loading starts the moment a deliberate move lands, with no delay, so the
+  // ~115 ms it takes runs *underneath* the arming delay instead of after it.
+  // Suppressed mid-burst: a held arrow is scrubRapid the whole way, so nothing
+  // is opened for backgrounds you are only passing over.
+  readonly property bool videoLoadable: videoAvailable && !scrubRapid
   property bool videoArmed: false
-  readonly property int videoDwellMs: 420
+  readonly property int videoArmDelayMs: 120
   readonly property var ansi: Model.ansi(selected)
   readonly property color bg: selected ? selected.colors.background || "#101315" : "#101315"
   readonly property color fg: selected ? selected.colors.foreground || "#cacccc" : "#cacccc"
@@ -177,6 +190,8 @@ Item {
     liftPending = false
     scrubArmed = false
     scrubQuick = false
+    scrubRapid = false   // a stale burst flag would suppress the first clip load
+    landing = true       // the first wallpaper of this open is a cut, not a fade
     wipeRun.stop(); wiping = false; wipeFrom = ""
     stage.opacity = 1
     wallpaperLayer.scale = 1
@@ -184,6 +199,13 @@ Item {
     filterText = ""
     modeFilter = "all"
     opened = true
+    // Land on the current theme from the previous open's index before asking
+    // for a fresh one. selectedIndex survives close(), and indexProc is async,
+    // so without this the overlay paints the last session's highlight until
+    // index.sh returns — long enough to read as "it opened on the wrong
+    // theme", and long enough for that stale selection to start playing its
+    // clip. Runs after `opened` so the dwell arms against the real landing.
+    if (themes.length) rebuild(true)
     indexProc.running = true
     Qt.callLater(function() { keys.forceActiveFocus() })
   }
@@ -280,13 +302,13 @@ Item {
   // properties are all current.
   function disarmVideo() {
     videoArmed = false
-    videoDwell.stop()
-    if (selectedVideoKey !== "" && !applying && opened) videoDwell.restart()
+    videoArm.stop()
+    if (selectedVideoKey !== "" && !applying && opened) videoArm.restart()
   }
 
   Timer {
-    id: videoDwell
-    interval: root.videoDwellMs
+    id: videoArm
+    interval: root.videoArmDelayMs
     onTriggered: if (root.videoAvailable) root.videoArmed = true
   }
 
@@ -295,10 +317,16 @@ Item {
   // through noteMove, and each of those should re-start the dwell too.
   onSelectedVideoKeyChanged: disarmVideo()
 
+  // Also arm when availability itself flips — reopening on the background you
+  // left on does not change selectedVideoKey, so the key handler never runs and
+  // nothing would ever start the timer. That is the whole reason a clip played
+  // on a fresh scrub but never on a reopen.
+  onVideoAvailableChanged: disarmVideo()
+
   // The exit owns the screen from the moment Enter is pressed. A clip still
   // running under the defocus would be motion inside the blur, and the lift
   // resolves back to a still desktop that has no video in it.
-  onApplyingChanged: if (applying) { videoArmed = false; videoDwell.stop() }
+  onApplyingChanged: if (applying) { videoArmed = false; videoArm.stop() }
 
   function setFilter(text) { scrubQuick = true; filterText = text; rebuild(false) }
   function cycleMode() { scrubQuick = true; modeFilter = Model.nextMode(modeFilter); rebuild(false) }
@@ -394,6 +422,9 @@ Item {
     else if (wiping) { wipeRun.stop(); wiping = false; wipeFrom = "" }
     shownKey = key
     scrubArmed = true          // the first key of an open is a landing, not a move
+    // Cleared only after the instant swap has been applied, so the very next
+    // move animates normally.
+    if (landing) Qt.callLater(function() { root.landing = false })
     if (wipe) wipeRun.restart()
   }
 
@@ -680,8 +711,15 @@ Item {
             // otherwise this is the plain crossfade it always was.
             z: incoming ? 1 : 0
             opacity: incoming || outgoing ? 1 : 0
+            // Not while landing. The first show of an open is arriving at the
+            // desktop you already have, not moving between two candidates, and
+            // the slot holding the theme you left on last time is still opaque.
+            // Animating that hand-off holds the old wallpaper at full strength
+            // for fadeDelayMs (170 ms on the theme axis) before it even starts
+            // to fade — which reads as the picker opening on the wrong theme
+            // and then correcting itself.
             Behavior on opacity {
-              enabled: !root.wiping
+              enabled: !root.wiping && !root.landing
               SequentialAnimation {
                 PauseAnimation { duration: root.fadeDelayMs }
                 NumberAnimation { duration: root.fadeMs; easing.type: Easing.InOutQuad }
@@ -735,12 +773,19 @@ Item {
           source: "VideoStage.qml"
           opacity: (status === Loader.Ready && item && item.showing) ? 1 : 0
           visible: opacity > 0
-          Behavior on opacity { NumberAnimation { duration: 260; easing.type: Easing.InOutQuad } }
+          // Short on purpose. This has to land inside the wipe that revealed
+          // the background, not resolve lazily after it — otherwise the clip
+          // arrives as its own separate event. It is also the seam the design
+          // note warns about: on a DEPART clip it is a no-op between identical
+          // frames, but on an ARRIVE clip it dissolves two different views of
+          // one scene, and a long dissolve there ghosts anything moving.
+          Behavior on opacity { NumberAnimation { duration: 140; easing.type: Easing.InOutQuad } }
           onLoaded: {
             item.source = Qt.binding(function() {
               return Util.fileUrl(Model.videoPath(root.thumbsDir, root.selectedVideoKey))
             })
-            item.active = Qt.binding(function() { return root.videoArmed && root.videoAvailable })
+            item.active = Qt.binding(function() { return root.videoLoadable })
+            item.playing = Qt.binding(function() { return root.videoArmed && root.videoAvailable })
             item.failed.connect(function() { root.videoArmed = false })
           }
         }

@@ -17,11 +17,21 @@ Item {
   id: stage
 
   property url source: ""
+  // Two stages, deliberately separate. `active` opens the file; `playing` runs
+  // it. Loading a local clip measured ~115 ms, so doing it *after* an arming
+  // delay put first motion at ~300 ms — past the 240 ms wipe, which is why the
+  // clip appeared to start only once the transition had finished. Overlapping
+  // the two puts motion inside the wipe.
   property bool active: false
+  property bool playing: false
 
   // The parent cross-fades on this, so it must mean "there is a frame to
   // show", not merely "a file was opened".
-  readonly property bool showing: active
+  // Revealed only once playback has actually been issued, so the layer never
+  // fades up on a frame that is sitting still — for an ARRIVE clip a held
+  // frame 0 is a different picture from the still beneath it, and pausing
+  // there would read as a stutter before the motion.
+  readonly property bool showing: active && started
     && (player.mediaStatus === MediaPlayer.LoadedMedia
         || player.mediaStatus === MediaPlayer.BufferedMedia
         || player.mediaStatus === MediaPlayer.BufferingMedia
@@ -66,7 +76,7 @@ Item {
   property bool started: false
 
   function maybePlay() {
-    if (!active || started) return
+    if (!active || !playing || started) return
     if (player.mediaStatus === MediaPlayer.LoadedMedia
         || player.mediaStatus === MediaPlayer.BufferedMedia) {
       started = true
@@ -82,4 +92,5 @@ Item {
     if (active) maybePlay()
     else { player.stop(); started = false }
   }
+  onPlayingChanged: if (playing) maybePlay()
 }
