@@ -119,7 +119,9 @@ Item {
   // Loading starts the moment a deliberate move lands, with no delay, so the
   // ~115 ms it takes runs *underneath* the arming delay instead of after it.
   // Suppressed mid-burst: a held arrow is scrubRapid the whole way, so nothing
-  // is opened for backgrounds you are only passing over.
+  // is opened for backgrounds you are only passing over. The arm timer clears
+  // that flag when movement stops — without which this stays false forever
+  // after the first fast scrub, since noteMove only ever sets it.
   readonly property bool videoLoadable: videoAvailable && !scrubRapid
   property bool videoArmed: false
   readonly property int videoArmDelayMs: 120
@@ -309,7 +311,16 @@ Item {
   Timer {
     id: videoArm
     interval: root.videoArmDelayMs
-    onTriggered: if (root.videoAvailable) root.videoArmed = true
+    onTriggered: {
+      // This timer only fires once movement has stopped — every move restarts
+      // it — so reaching here is the definition of the burst being over.
+      // scrubRapid records that the *last* move was part of one, and nothing
+      // else ever clears it, so leaving it set would keep videoLoadable false
+      // for the rest of the session: clips would play on the background you
+      // opened onto and never on one you scrubbed to.
+      scrubRapid = false
+      if (root.videoAvailable) root.videoArmed = true
+    }
   }
 
   // Every route to a different background ends here, not just the arrow keys:
