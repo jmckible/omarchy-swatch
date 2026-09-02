@@ -93,4 +93,12 @@ Item {
     else { player.stop(); started = false }
   }
   onPlayingChanged: if (playing) maybePlay()
+
+  // `started` is per-clip, so it has to clear when the clip changes and not
+  // only when the player is torn down. Moving between two animated backgrounds
+  // deliberately never drops `active` — there is no rapid scrub to drop it —
+  // so the flag survived from the previous clip and maybePlay returned early:
+  // the new file loaded and then sat there. Playing worked once per session of
+  // continuous availability, which read as intermittent.
+  onSourceChanged: started = false
 }
