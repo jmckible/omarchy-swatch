@@ -154,6 +154,15 @@ Item {
   }
   function sp(px) { var n = px * metricScale; return n <= 0 ? 0 : Math.max(1, Math.round(n)) }
 
+  // One shear for the whole overlay. Every parallelogram on screen — the theme
+  // cards, the background cards, the sample panels, the gate — leans by this
+  // fraction of its own height, so every slanted edge is parallel to every
+  // other one and nothing can read as pointing the other way. Anything that
+  // instead took a fixed offset, or turned the shape to follow its own strip's
+  // axis, ends up raking against its neighbours: a shear leaves horizontals
+  // horizontal, and only the vertical edges move.
+  readonly property real rake: 0.19
+
   // Reading content scales with the screen above a 1440-wide baseline, so a
   // 13" laptop keeps Style's sizes and a 4K desk doesn't get 13 px samples.
   readonly property real k: panel.width > 0 ? Math.max(1, Math.min(1.8, panel.width / 1440)) : 1
@@ -916,6 +925,11 @@ Item {
           visible: !!(root.selected && root.selected.backgrounds.length > 1)
           width: root.bgThumbW + root.sp(120)
           height: root.bgStripH
+          // The theme card's own lean, taken off this card's height so the two
+          // strips' edges come out parallel. A stack does not need the shape
+          // turned to suit its axis — under one shear the tops and bottoms stay
+          // level and only the sides move, whichever way the strip runs.
+          readonly property int skew: Math.round(root.bgThumbH * root.rake)
 
           ListView {
             id: bgStrip
@@ -944,26 +958,52 @@ Item {
               width: root.bgThumbW
               height: root.bgThumbH
 
-              Rectangle {
+              Item {
                 anchors.fill: parent
-                color: Util.alpha(root.bg, 0.6)
                 opacity: bgCell.sel ? 1 : 0.72
                 scale: bgCell.sel ? 1.0 : 0.94
                 Behavior on opacity { NumberAnimation { duration: 120 } }
                 Behavior on scale { NumberAnimation { duration: 120 } }
-                clip: true
-                CacheImage {
+
+                Item {
                   anchors.fill: parent
-                  path: Model.thumbPath(root.thumbsDir, bgCell.key)
-                  cache: true
-                  sourceSize: Qt.size(Math.round(width * panel.dpr), Math.round(height * panel.dpr))
-                  visible: status === Image.Ready
+                  layer.enabled: true
+                  layer.smooth: true
+                  layer.effect: MultiEffect {
+                    maskEnabled: true
+                    maskSource: bgCardMask
+                    maskThresholdMin: 0.3
+                    maskSpreadAtMin: 0.3
+                  }
+                  Rectangle {
+                    anchors.fill: parent
+                    color: Util.alpha(root.bg, 0.6)
+                  }
+                  CacheImage {
+                    anchors.fill: parent
+                    path: Model.thumbPath(root.thumbsDir, bgCell.key)
+                    cache: true
+                    sourceSize: Qt.size(Math.round(width * panel.dpr), Math.round(height * panel.dpr))
+                    visible: status === Image.Ready
+                  }
                 }
-                Rectangle {
+                // The border is the marking here — a card this size has no gate
+                // around it — so it is stroked outside the mask, where the soft
+                // edge cannot eat half the accent.
+                Shape {
                   anchors.fill: parent
-                  color: "transparent"
-                  border.width: bgCell.sel ? root.sp(2) : 1
-                  border.color: bgCell.sel ? root.accent : Util.alpha(root.fg, 0.22)
+                  antialiasing: true
+                  preferredRendererType: Shape.CurveRenderer
+                  ShapePath {
+                    fillColor: "transparent"
+                    strokeWidth: bgCell.sel ? root.sp(2) : 1
+                    strokeColor: bgCell.sel ? root.accent : Util.alpha(root.fg, 0.22)
+                    startX: bgArea.skew; startY: 0
+                    PathLine { x: bgCell.width; y: 0 }
+                    PathLine { x: bgCell.width - bgArea.skew; y: bgCell.height }
+                    PathLine { x: 0; y: bgCell.height }
+                    PathLine { x: bgArea.skew; y: 0 }
+                  }
                 }
               }
               MouseArea {
@@ -979,7 +1019,26 @@ Item {
             gradient: Gradient { GradientStop { position: 0; color: Util.alpha(root.bg, 0.75) } GradientStop { position: 1; color: Util.alpha(root.bg, 0) } } }
           Rectangle { anchors { bottom: parent.bottom; left: parent.left } width: root.bgThumbW; height: root.sp(40)
             gradient: Gradient { GradientStop { position: 0; color: Util.alpha(root.bg, 0) } GradientStop { position: 1; color: Util.alpha(root.bg, 0.75) } } }
-          Rectangle { x: -root.sp(10); anchors.verticalCenter: parent.verticalCenter; width: root.sp(2); height: root.bgThumbH + root.sp(8); color: root.fg; opacity: 0.9 }
+          // The playhead leans with the cards it marks. Under one shear a
+          // vertical line is not vertical any more, and a straight one beside a
+          // leaning card is the thing that would read as pointing elsewhere.
+          Shape {
+            id: playhead
+            x: -root.sp(10)
+            y: Math.round((parent.height - height) / 2)
+            width: Math.round(height * root.rake)
+            height: root.bgThumbH + root.sp(8)
+            antialiasing: true
+            preferredRendererType: Shape.CurveRenderer
+            ShapePath {
+              fillColor: "transparent"
+              strokeColor: root.fg
+              strokeWidth: root.sp(2)
+              capStyle: ShapePath.FlatCap
+              startX: playhead.width; startY: 0
+              PathLine { x: 0; y: playhead.height }
+            }
+          }
 
           Column {
             anchors { left: bgStrip.right; leftMargin: root.sp(14); verticalCenter: parent.verticalCenter }
@@ -999,22 +1058,56 @@ Item {
 
       // ---- samples: the palette doing its actual job
       Column {
+        id: samples
+        // Two panels, one shear. Each leans by the rake taken off its own
+        // height — so their edges are parallel to each other and to the cards —
+        // and each is pushed right by however much shear has accumulated below
+        // it, so the two left edges make one continuous line down the stack
+        // instead of sawtoothing back out at the gap. The sizes come off the
+        // panels' content and not their laid-out heights: a height that
+        // included its own skew would define the skew in terms of itself.
+        readonly property int gap: root.sp(14)
+        readonly property int panelW: Math.round(root.sp(500) * root.k)
+        readonly property int hTerm: sample.implicitHeight + root.sp(28)
+        readonly property int hCode: code.implicitHeight + root.sp(28)
+        readonly property int skewTerm: Math.round(hTerm * root.rake)
+        readonly property int skewCode: Math.round(hCode * root.rake)
+        readonly property int xTerm: Math.round((gap + hCode) * root.rake)
         opacity: root.chromeOpacity
+        width: panelW + xTerm
         anchors { right: parent.right; top: parent.top; rightMargin: root.sp(56); topMargin: root.sp(52) }
-        spacing: root.sp(14)
+        spacing: gap
         visible: !!root.selected
 
-      Rectangle {
-        width: Math.round(root.sp(500) * root.k)
-        height: sample.implicitHeight + root.sp(28)
-        color: Util.alpha(root.bg, 0.88)
-        border.width: 1
-        border.color: root.accent
+      Item {
+        id: termPanel
+        x: samples.xTerm
+        width: samples.panelW
+        height: samples.hTerm
         visible: !!root.selected
+
+        // Filled and stroked as one path. No mask: the panel's ground is a flat
+        // colour a Shape can lay down itself, and the text is inset clear of
+        // both cut corners, so a layer per panel would buy nothing.
+        Shape {
+          anchors.fill: parent
+          antialiasing: true
+          preferredRendererType: Shape.CurveRenderer
+          ShapePath {
+            fillColor: Util.alpha(root.bg, 0.88)
+            strokeColor: root.accent
+            strokeWidth: 1
+            startX: samples.skewTerm; startY: 0
+            PathLine { x: termPanel.width; y: 0 }
+            PathLine { x: termPanel.width - samples.skewTerm; y: termPanel.height }
+            PathLine { x: 0; y: termPanel.height }
+            PathLine { x: samples.skewTerm; y: 0 }
+          }
+        }
 
         Column {
           id: sample
-          anchors { left: parent.left; right: parent.right; top: parent.top; margins: root.sp(14) }
+          anchors { left: parent.left; right: parent.right; top: parent.top; leftMargin: root.sp(14) + samples.skewTerm; rightMargin: root.sp(14); topMargin: root.sp(14) }
           spacing: root.sp(4)
           readonly property int px: root.samplePx
           readonly property string ff: Style.fontFamily
@@ -1037,16 +1130,31 @@ Item {
       }
 
       // A small Rails model, in homage to where Omarchy comes from.
-      Rectangle {
-        width: Math.round(root.sp(500) * root.k)
-        height: code.implicitHeight + root.sp(28)
-        color: Util.alpha(root.bg, 0.88)
-        border.width: 1
-        border.color: Util.alpha(root.fg, 0.35)
+      Item {
+        id: codePanel
+        x: 0
+        width: samples.panelW
+        height: samples.hCode
+
+        Shape {
+          anchors.fill: parent
+          antialiasing: true
+          preferredRendererType: Shape.CurveRenderer
+          ShapePath {
+            fillColor: Util.alpha(root.bg, 0.88)
+            strokeColor: Util.alpha(root.fg, 0.35)
+            strokeWidth: 1
+            startX: samples.skewCode; startY: 0
+            PathLine { x: codePanel.width; y: 0 }
+            PathLine { x: codePanel.width - samples.skewCode; y: codePanel.height }
+            PathLine { x: 0; y: codePanel.height }
+            PathLine { x: samples.skewCode; y: 0 }
+          }
+        }
 
         Column {
           id: code
-          anchors { left: parent.left; right: parent.right; top: parent.top; margins: root.sp(14) }
+          anchors { left: parent.left; right: parent.right; top: parent.top; leftMargin: root.sp(14) + samples.skewCode; rightMargin: root.sp(14); topMargin: root.sp(14) }
           spacing: root.sp(4)
           readonly property int px: root.samplePx
           readonly property string ff: Style.fontFamily
@@ -1161,6 +1269,55 @@ Item {
         }
       }
 
+      // One mask per strip, shared by every card in it: the shape is identical
+      // card to card and MultiEffect stretches its source over whatever it
+      // masks, so a strip pays for a single mask texture however many cards are
+      // in view. They sit outside the strips because both fade on
+      // chromeOpacity, and a mask that stops being rendered takes with it every
+      // card that reads from it.
+      Item {
+        id: cardMask
+        width: root.thumbW
+        height: root.thumbH
+        visible: false
+        layer.enabled: true
+        Shape {
+          anchors.fill: parent
+          antialiasing: true
+          preferredRendererType: Shape.CurveRenderer
+          ShapePath {
+            fillColor: "white"
+            strokeColor: "transparent"
+            startX: stripArea.skew; startY: 0
+            PathLine { x: cardMask.width; y: 0 }
+            PathLine { x: cardMask.width - stripArea.skew; y: cardMask.height }
+            PathLine { x: 0; y: cardMask.height }
+            PathLine { x: stripArea.skew; y: 0 }
+          }
+        }
+      }
+      Item {
+        id: bgCardMask
+        width: root.bgThumbW
+        height: root.bgThumbH
+        visible: false
+        layer.enabled: true
+        Shape {
+          anchors.fill: parent
+          antialiasing: true
+          preferredRendererType: Shape.CurveRenderer
+          ShapePath {
+            fillColor: "white"
+            strokeColor: "transparent"
+            startX: bgArea.skew; startY: 0
+            PathLine { x: bgCardMask.width; y: 0 }
+            PathLine { x: bgCardMask.width - bgArea.skew; y: bgCardMask.height }
+            PathLine { x: 0; y: bgCardMask.height }
+            PathLine { x: bgArea.skew; y: 0 }
+          }
+        }
+      }
+
       // ---- filmstrip running through a fixed gate
       Item {
         id: stripArea
@@ -1175,6 +1332,11 @@ Item {
         readonly property int thumbH: root.thumbH
         readonly property real liveScale: 1.06
         readonly property int lift: root.sp(7)
+        // The cards are parallelograms, the way the stock image picker's slices
+        // are: the top edge leads the bottom, so the gaps between cards become
+        // parallel slanted bands and the strip reads as film running past
+        // rather than a row of tiles.
+        readonly property int skew: Math.round(root.thumbH * root.rake)
 
         ListView {
           id: strip
@@ -1207,7 +1369,7 @@ Item {
             // A padded box the layer can put the shadow in — the delegate is
             // exactly a card wide, and a layer only renders what it covers. It
             // is live on the selected cell alone, so the strip carries one
-            // render target however many themes are in it.
+            // shadow render target however many themes are in it.
             Item {
               id: lifted
               x: -cell.pad
@@ -1223,64 +1385,96 @@ Item {
                 shadowOpacity: 0.55
               }
 
-              Rectangle {
+              Item {
                 id: card
                 x: cell.pad
                 y: Math.round((lifted.height - height) / 2) - (cell.selected ? stripArea.lift : 0)
                 width: stripArea.thumbW
                 height: stripArea.thumbH
-                color: cell.modelData.colors.background || "#000"
                 scale: cell.selected ? stripArea.liveScale : 0.92
                 Behavior on scale { NumberAnimation { duration: 140; easing.type: Easing.OutQuad } }
                 Behavior on y { NumberAnimation { duration: 140; easing.type: Easing.OutQuad } }
-                clip: true
 
-                // Painted card: instant, zero I/O. The thumb lands on top.
-                Column {
-                  anchors { left: parent.left; top: parent.top; margins: root.sp(10) }
-                  spacing: root.sp(5)
-                  Rectangle { width: cell.width * 0.55; height: root.sp(5); color: cell.modelData.colors.accent || "#888" }
-                  Rectangle { width: cell.width * 0.8; height: root.sp(5); color: cell.modelData.colors.foreground || "#ccc"; opacity: 0.8 }
-                  Rectangle { width: cell.width * 0.4; height: root.sp(5); color: cell.modelData.colors.green || "#8c8" }
-                }
-                CacheImage {
+                // Everything the card is made of goes through the mask, so the
+                // artwork stays upright inside a slanted frame — shearing the
+                // card would lean the wallpaper, the palette bar and the name
+                // along with it. The outline is stroked outside this layer,
+                // where the mask's soft edge cannot eat half of it.
+                Item {
+                  id: cardFill
                   anchors.fill: parent
-                  path: Model.thumbPath(root.thumbsDir, cell.modelData.previewKey)
-                  cache: true
-                  sourceSize: Qt.size(Math.round(width * panel.dpr), Math.round(height * panel.dpr))
-                  visible: status === Image.Ready
+                  layer.enabled: true
+                  layer.smooth: true
+                  layer.effect: MultiEffect {
+                    maskEnabled: true
+                    maskSource: cardMask
+                    maskThresholdMin: 0.3
+                    maskSpreadAtMin: 0.3
+                  }
+
+                  Rectangle {
+                    anchors.fill: parent
+                    color: cell.modelData.colors.background || "#000"
+                  }
+
+                  // Painted card: instant, zero I/O. The thumb lands on top.
+                  // Held clear of the cut corner, or the bars come out chopped.
+                  Column {
+                    anchors { left: parent.left; top: parent.top; topMargin: root.sp(10); leftMargin: root.sp(10) + stripArea.skew }
+                    spacing: root.sp(5)
+                    Rectangle { width: cell.width * 0.55; height: root.sp(5); color: cell.modelData.colors.accent || "#888" }
+                    Rectangle { width: cell.width * 0.8; height: root.sp(5); color: cell.modelData.colors.foreground || "#ccc"; opacity: 0.8 }
+                    Rectangle { width: cell.width * 0.4; height: root.sp(5); color: cell.modelData.colors.green || "#8c8" }
+                  }
+                  CacheImage {
+                    anchors.fill: parent
+                    path: Model.thumbPath(root.thumbsDir, cell.modelData.previewKey)
+                    cache: true
+                    sourceSize: Qt.size(Math.round(width * panel.dpr), Math.round(height * panel.dpr))
+                    visible: status === Image.Ready
+                  }
+                  // Neighbours sit under a veil of the candidate's own background,
+                  // so the falling-back is palette-driven like everything else
+                  // here. The palette bar and the name stay above it, legible.
+                  Rectangle {
+                    anchors.fill: parent
+                    color: root.bg
+                    opacity: cell.selected ? 0 : 0.42
+                    Behavior on opacity { NumberAnimation { duration: 140 } }
+                  }
+                  Row {
+                    anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
+                    height: root.sp(4)
+                    Repeater { model: Model.ansi(cell.modelData); Rectangle { required property var modelData; width: cell.width / 6; height: root.sp(4); color: modelData } }
+                  }
+                  Text {
+                    anchors { left: parent.left; bottom: parent.bottom; leftMargin: root.sp(8); bottomMargin: root.sp(9) }
+                    text: cell.modelData.name
+                    textFormat: Text.PlainText
+                    color: cell.modelData.colors.foreground || "#fff"
+                    font.family: Style.fontFamily
+                    font.pixelSize: root.fz.caption
+                    style: Text.Outline
+                    styleColor: Util.alpha(cell.modelData.colors.background || "#000", 0.9)
+                  }
                 }
-                // Neighbours sit under a veil of the candidate's own background,
-                // so the falling-back is palette-driven like everything else
-                // here. The palette bar and the name stay above it, legible.
-                Rectangle {
-                  anchors.fill: parent
-                  color: root.bg
-                  opacity: cell.selected ? 0 : 0.42
-                  Behavior on opacity { NumberAnimation { duration: 140 } }
-                }
-                Row {
-                  anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
-                  height: root.sp(4)
-                  Repeater { model: Model.ansi(cell.modelData); Rectangle { required property var modelData; width: cell.width / 6; height: root.sp(4); color: modelData } }
-                }
-                Text {
-                  anchors { left: parent.left; bottom: parent.bottom; leftMargin: root.sp(8); bottomMargin: root.sp(9) }
-                  text: cell.modelData.name
-                  textFormat: Text.PlainText
-                  color: cell.modelData.colors.foreground || "#fff"
-                  font.family: Style.fontFamily
-                  font.pixelSize: root.fz.caption
-                  style: Text.Outline
-                  styleColor: Util.alpha(cell.modelData.colors.background || "#000", 0.9)
-                }
+
                 // A hairline, never an accent border: the gate does the marking,
                 // so the live card can keep its artwork unframed.
-                Rectangle {
+                Shape {
                   anchors.fill: parent
-                  color: "transparent"
-                  border.width: 1
-                  border.color: Util.alpha(cell.modelData.colors.foreground || "#fff", cell.selected ? 0.3 : 0.18)
+                  antialiasing: true
+                  preferredRendererType: Shape.CurveRenderer
+                  ShapePath {
+                    fillColor: "transparent"
+                    strokeWidth: 1
+                    strokeColor: Util.alpha(cell.modelData.colors.foreground || "#fff", cell.selected ? 0.3 : 0.18)
+                    startX: stripArea.skew; startY: 0
+                    PathLine { x: card.width; y: 0 }
+                    PathLine { x: card.width - stripArea.skew; y: card.height }
+                    PathLine { x: 0; y: card.height }
+                    PathLine { x: stripArea.skew; y: 0 }
+                  }
                 }
               }
             }
@@ -1318,25 +1512,50 @@ Item {
           readonly property int armW: root.sp(26)
           readonly property int armH: root.sp(18)
           readonly property color keyline: Util.alpha(root.bg, 0.75)
+          // The brackets lean with the cards: the shear off the gate's own
+          // height, so the gate looks cut from the same film.
+          readonly property real skew: gate.height * root.rake
 
           Repeater {
             model: 4
-            Item {
+            Shape {
               id: corner
               required property int index
               readonly property bool onRight: index === 1 || index === 3
               readonly property bool onBottom: index > 1
-              readonly property int ax: onRight ? width - gate.t : 0
-              readonly property int ay: onBottom ? height - gate.t : 0
-              width: gate.armW
-              height: gate.armH
-              x: onRight ? gate.width - width : 0
-              y: onBottom ? gate.height - height : 0
+              // The corner itself, then one step along each of the two edges
+              // that meet there — along the top or bottom, and down or up the
+              // slant.
+              readonly property real vx: onRight ? (onBottom ? gate.width - gate.skew : gate.width) : (onBottom ? 0 : gate.skew)
+              readonly property real vy: onBottom ? gate.height : 0
+              readonly property real hx: vx + (onRight ? -gate.armW : gate.armW)
+              readonly property real sx: vx + (onBottom ? 1 : -1) * gate.skew * gate.armH / gate.height
+              readonly property real sy: onBottom ? gate.height - gate.armH : gate.armH
 
-              Rectangle { x: -1; y: corner.ay - 1; width: corner.width + 2; height: gate.t + 2; color: gate.keyline }
-              Rectangle { x: corner.ax - 1; y: -1; width: gate.t + 2; height: corner.height + 2; color: gate.keyline }
-              Rectangle { x: 0; y: corner.ay; width: corner.width; height: gate.t; color: root.accent }
-              Rectangle { x: corner.ax; y: 0; width: gate.t; height: corner.height; color: root.accent }
+              anchors.fill: parent
+              antialiasing: true
+              preferredRendererType: Shape.CurveRenderer
+
+              ShapePath {
+                fillColor: "transparent"
+                strokeColor: gate.keyline
+                strokeWidth: gate.t + 2
+                capStyle: ShapePath.FlatCap
+                joinStyle: ShapePath.MiterJoin
+                startX: corner.hx; startY: corner.vy
+                PathLine { x: corner.vx; y: corner.vy }
+                PathLine { x: corner.sx; y: corner.sy }
+              }
+              ShapePath {
+                fillColor: "transparent"
+                strokeColor: root.accent
+                strokeWidth: gate.t
+                capStyle: ShapePath.FlatCap
+                joinStyle: ShapePath.MiterJoin
+                startX: corner.hx; startY: corner.vy
+                PathLine { x: corner.vx; y: corner.vy }
+                PathLine { x: corner.sx; y: corner.sy }
+              }
             }
           }
         }
