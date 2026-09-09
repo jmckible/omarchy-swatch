@@ -9,7 +9,7 @@ Built to stay instant at any collection size: an incremental index of every `col
 Plugin id `jmckible.swatch`. MIT. Not affiliated with Omarchy or 37signals.
 
 <p align="center"><img src="docs/screenshots/demo.gif" alt="Scrubbing through themes full-screen, then an animated background settling into its still" width="900"></p>
-<p align="center"><sub>The clip at the end previews animated backgrounds — a wallpaper with a moving version of itself (<a href="https://x.com/yamzeight/status/2089340897326469186">teaser footage by @yamzeight</a>, not included in this repo). Designed but not built: see <a href="docs/animated-backgrounds.md">docs/animated-backgrounds.md</a>. This release previews stills.</sub></p>
+<p align="center"><sub>The clip at the end is an animated background — a wallpaper with a moving version of itself (<a href="https://x.com/yamzeight/status/2089340897326469186">teaser footage by @yamzeight</a>, not included in this repo). How it works, and why it is a property of the background rather than of the theme: <a href="docs/animated-backgrounds.md">docs/animated-backgrounds.md</a>.</sub></p>
 
 | Preview | Backgrounds | Filter |
 |---|---|---|
