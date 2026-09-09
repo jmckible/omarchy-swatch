@@ -1,7 +1,8 @@
 # Animated backgrounds
 
-The attempt on `origin/video` (`7f61216`, built on `fbe45f7`) is an older,
-different model. Do not revive it; this is what replaced it and why.
+The attempt at commit `7f61216` (built on `fbe45f7`), in `main`'s own
+history, is an older, different model. Do not revive it; this is what
+replaced it and why.
 
 ## The model
 
