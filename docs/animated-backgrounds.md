@@ -216,6 +216,38 @@ jump-cut exactly those four every time it wrapped.
 Still open: whether DEPART clips should loop instead, since they end away from
 their still and so have nowhere natural to rest.
 
+## Getting clips
+
+No footage ships in this repo, and none will. The clips in the README and the
+demo are [@yamzeight](https://x.com/yamzeight)'s work; crediting him is not the
+same as being licensed to redistribute him, so they stay where he published
+them and you fetch your own copy. If you use his footage anywhere public,
+credit him there too — it is the whole reason the feature has anything to
+demonstrate.
+
+The plugin has no opinion about where a clip came from. Any video you hold the
+rights to becomes an animated background the moment it is named after a still
+and dropped in the theme's directory under `~/.config/omarchy/backgrounds/`:
+
+```sh
+mkdir -p ~/.config/omarchy/backgrounds/retro-82
+ffmpeg -i your-clip.mp4 -c:v copy -an \
+  ~/.config/omarchy/backgrounds/retro-82/2-dusk-guardian.mp4
+```
+
+**The stem is the pairing.** `2-dusk-guardian.mp4` attaches to the background
+whose own file is `2-dusk-guardian.webp`, wherever that background lives — which
+is why this directory and not the theme's: a stock theme is root-owned under
+`/usr/share/omarchy`, and a user theme is often a git checkout whose upstream
+would clobber anything you wrote inside it. Where a theme ships no still by that
+name, put one in the same directory and it becomes a real, selectable background
+with a clip attached.
+
+Open the picker once afterwards and `thumbs.sh` transcodes what it finds, so the
+shell's decoder only ever sees bytes our encoder wrote. It drops audio, metadata
+and subtitles in the process; the `-an` above is only so the file you keep is as
+small as the one we use.
+
 ## Test footage
 
 yamz8's, local only, never committed — see `CLAUDE.md` for where it lives and

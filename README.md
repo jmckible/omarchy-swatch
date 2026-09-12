@@ -38,6 +38,7 @@ Requires `jq`, `vips` and `python3` (all ship with Omarchy). Wallpaper previews 
 | `←` `→` | Previous / next theme |
 | `↑` `↓` | Cycle the theme's backgrounds |
 | `PgUp` `PgDn` `Home` `End` | Jump |
+| hold `Space` | Hide the interface to inspect the wallpaper (when the filter is empty) |
 | type | Filter by name |
 | `Tab` | Cycle the filter chips: All → Dark → Light → Installed → Stock (or click one) |
 | `Enter` / double-click | Apply (`omarchy theme set`, plus `bg set` if you picked a background) |
@@ -59,7 +60,7 @@ theme=$(~/.config/omarchy/plugins/jmckible.swatch/pick.sh) && omarchy theme set 
 - `thumbs.sh` makes, for every wallpaper the index names, a stage copy at your largest monitor's size (never upscaled) and a 640×360 filmstrip thumb. It runs on every open and does nothing when nothing is missing. The shell shows only these copies — it never opens a theme's own image file — which is also why webp wallpapers preview without `qt6-imageformats`.
 - Live preview is the same call `omarchy theme set` makes over IPC (`shell applyTheme`) — shell-only, reverted on cancel, never written to disk. Terminal palettes and Hyprland borders change on apply, not during preview.
 - Themes are treated as untrusted input. Every theme file the plugin reads is opened exactly once, without following symlinks, and verified on that descriptor (regular file, size ceiling, inside the theme's directory) before its bytes go anywhere; a file that grows past the ceiling is refused, not truncated. Images are decoded only from such a snapshot, single-threaded under a timeout and memory limit, at most four at a time, after a header check (loader allowlist, 50 MP). Ceilings: 32 KB TOML, 64 MB images, 200 backgrounds, 512 themes, 8 MB index. Writes go only to `~/.cache/omarchy/swatch/`, through exclusively created temp files.
-- Animated backgrounds: drop `3-sunset-lake.mp4` next to `3-sunset-lake.webp` and that wallpaper moves when you rest on it. Clips are transcoded into the cache like every other derivative — the shell never plays a theme's own file — and audio is dropped. Needs `qt6-multimedia`, which Omarchy doesn't require; without it the picker shows stills and nothing else changes. See [docs/animated-backgrounds.md](docs/animated-backgrounds.md).
+- Animated backgrounds: drop `3-sunset-lake.mp4` into `~/.config/omarchy/backgrounds/<theme>/` and the wallpaper whose own file is `3-sunset-lake.webp` moves when you rest on it — that directory rather than the theme's, so it works for a root-owned stock theme too. Clips are transcoded into the cache like every other derivative — the shell never plays a theme's own file — and audio is dropped. Needs `qt6-multimedia`, which Omarchy doesn't require; without it the picker shows stills and nothing else changes. How to add your own: [Getting clips](docs/animated-backgrounds.md#getting-clips).
 
 ## Remove
 
