@@ -37,6 +37,8 @@ Item {
         || player.mediaStatus === MediaPlayer.BufferingMedia
         || player.mediaStatus === MediaPlayer.EndOfMedia)
 
+  readonly property bool motionPlaying: showing && player.playbackState === MediaPlayer.PlayingState
+
   signal failed()
 
   MediaPlayer {

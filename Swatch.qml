@@ -98,6 +98,19 @@ Item {
   // only while applying) so the picker doesn't fade in over itself.
   property real chromeOpacity: 1
   Behavior on chromeOpacity { enabled: root.applying; NumberAnimation { duration: 180; easing.type: Easing.OutQuad } }
+  readonly property bool videoMoving: videoLoader.status === Loader.Ready
+    && videoLoader.item && videoLoader.item.motionPlaying
+  property bool previewsQuiet: false
+  onVideoMovingChanged: {
+    previewsQuiet = false
+    if (videoMoving) previewQuietDelay.restart()
+    else previewQuietDelay.stop()
+  }
+  Timer {
+    id: previewQuietDelay
+    interval: 1000
+    onTriggered: root.previewsQuiet = root.videoMoving
+  }
   property bool livePreview: true
 
   readonly property var selected: (selectedIndex >= 0 && selectedIndex < rows.length) ? rows[selectedIndex] : null
@@ -150,6 +163,7 @@ Item {
   function freezeMetrics() {
     var m = Number(Style.effectiveSpacingScale)
     metricScale = m > 0 ? m : 1
+    samplePx = Math.max(1, Math.round(Style.fontBaseSize))
     fz = { caption: root.fz.caption, body: root.fz.body, subtitle: root.fz.subtitle, title: root.fz.title, heading: root.fz.heading }
   }
   function sp(px) { var n = px * metricScale; return n <= 0 ? 0 : Math.max(1, Math.round(n)) }
@@ -167,7 +181,9 @@ Item {
   // 13" laptop keeps Style's sizes and a 4K desk doesn't get 13 px samples.
   readonly property real k: panel.width > 0 ? Math.max(1, Math.min(1.8, panel.width / 1440)) : 1
   readonly property int metaPx: Math.round(root.fz.body * k)
-  readonly property int samplePx: Math.round(root.fz.subtitle * k)
+  // Native shell text size, captured on open. No presentation enlargement,
+  // and no resizing as candidate themes retint the shell while browsing.
+  property int samplePx: 12
 
   // Stage copies are made at the largest monitor's physical size, measured by
   // index.sh. The shell never decodes a theme's own file; everything it shows
@@ -187,6 +203,7 @@ Item {
     applying = false
     applyTarget = ""
     chromeOpacity = 1
+    previewsQuiet = false
     exitBlur = 0
     blackout = 0
     liftPending = false
@@ -303,6 +320,8 @@ Item {
   // does not would see the old `true` and start a useless one. The raw
   // properties are all current.
   function disarmVideo() {
+    previewsQuiet = false
+    previewQuietDelay.stop()
     videoArmed = false
     videoArm.stop()
     if (selectedVideoKey !== "" && !applying && opened) videoArm.restart()
@@ -886,6 +905,7 @@ Item {
 
       // ---- title block
       Column {
+        id: titleBlock
         opacity: root.chromeOpacity
         anchors { left: parent.left; top: parent.top; leftMargin: root.sp(56); topMargin: root.sp(52) }
         spacing: root.sp(12)
@@ -914,7 +934,7 @@ Item {
         Row {
           Repeater {
             model: root.ansi
-            Rectangle { required property var modelData; width: Math.round(root.sp(38) * Math.sqrt(root.k)); height: Math.round(root.sp(10) * Math.sqrt(root.k)); color: modelData }
+            Rectangle { required property var modelData; width: root.paletteSwatchW; height: Math.round(root.sp(10) * Math.sqrt(root.k)); color: modelData }
           }
         }
         // Backgrounds: a vertical filmstrip under its own playhead. The theme
@@ -925,6 +945,7 @@ Item {
           visible: !!(root.selected && root.selected.backgrounds.length > 1)
           width: root.bgThumbW + root.sp(120)
           height: root.bgStripH
+          readonly property real selectedCenter: root.bgThumbH / 2
           // The theme card's own lean, taken off this card's height so the two
           // strips' edges come out parallel. A stack does not need the shape
           // turned to suit its axis — under one shear the tops and bottoms stay
@@ -940,20 +961,26 @@ Item {
             spacing: root.sp(8)
             clip: true
             currentIndex: root.bgIndex
+            // A fixed top slot: the strip moves through it, while the label
+            // and marker stay still. Strict range also holds the last item at
+            // the top instead of pushing it down to fill the viewport.
             highlightRangeMode: ListView.StrictlyEnforceRange
-            preferredHighlightBegin: height / 2 - root.bgThumbH / 2
-            preferredHighlightEnd: height / 2 + root.bgThumbH / 2
+            preferredHighlightBegin: 0
+            preferredHighlightEnd: root.bgThumbH
             highlightMoveDuration: 140
             cacheBuffer: root.bgThumbH * 8
             reuseItems: true
             boundsBehavior: Flickable.StopAtBounds
-            onCurrentIndexChanged: if (currentIndex >= 0 && currentIndex !== root.bgIndex) root.bgIndex = currentIndex
+            onCurrentIndexChanged: {
+              if (currentIndex >= 0 && currentIndex !== root.bgIndex) root.bgIndex = currentIndex
+            }
 
             delegate: Item {
               id: bgCell
               required property int index
               required property var modelData
               readonly property bool sel: index === root.bgIndex
+              z: sel ? 1 : 0
               readonly property string key: root.selected && root.selected.bgKeys ? (root.selected.bgKeys[index] || "") : ""
               width: root.bgThumbW
               height: root.bgThumbH
@@ -961,7 +988,10 @@ Item {
               Item {
                 anchors.fill: parent
                 opacity: bgCell.sel ? 1 : 0.72
-                scale: bgCell.sel ? 1.0 : 0.94
+                // The selected card fills the reserved frame; neighbors sit
+                // back so enlargement cannot clip at the first or last row.
+                transformOrigin: Item.Center
+                scale: bgCell.sel ? 1.0 : 0.88
                 Behavior on opacity { NumberAnimation { duration: 120 } }
                 Behavior on scale { NumberAnimation { duration: 120 } }
 
@@ -1014,18 +1044,15 @@ Item {
             }
           }
 
-          // Edge fades, playhead, and the count.
-          Rectangle { anchors { top: parent.top; left: parent.left } width: root.bgThumbW; height: root.sp(40)
-            gradient: Gradient { GradientStop { position: 0; color: Util.alpha(root.bg, 0.75) } GradientStop { position: 1; color: Util.alpha(root.bg, 0) } } }
-          Rectangle { anchors { bottom: parent.bottom; left: parent.left } width: root.bgThumbW; height: root.sp(40)
-            gradient: Gradient { GradientStop { position: 0; color: Util.alpha(root.bg, 0) } GradientStop { position: 1; color: Util.alpha(root.bg, 0.75) } } }
+          // No painted edge fades: the wallpaper is visible through empty
+          // space, so a theme-colored overlay would leave rectangular patches.
           // The playhead leans with the cards it marks. Under one shear a
           // vertical line is not vertical any more, and a straight one beside a
           // leaning card is the thing that would read as pointing elsewhere.
           Shape {
             id: playhead
             x: -root.sp(10)
-            y: Math.round((parent.height - height) / 2)
+            y: Math.round(bgArea.selectedCenter - height / 2)
             width: Math.round(height * root.rake)
             height: root.bgThumbH + root.sp(8)
             antialiasing: true
@@ -1041,7 +1068,8 @@ Item {
           }
 
           Column {
-            anchors { left: bgStrip.right; leftMargin: root.sp(14); verticalCenter: parent.verticalCenter }
+            anchors { left: bgStrip.right; leftMargin: root.sp(14) }
+            y: Math.round(bgArea.selectedCenter - height / 2)
             spacing: root.sp(4)
             Text { text: root.selected ? (root.bgIndex + 1) + " / " + root.selected.backgrounds.length : ""; color: root.fg; font.family: Style.fontFamily; font.pixelSize: root.fz.title; font.weight: Font.DemiBold }
             Text { text: "backgrounds"; color: root.fg; opacity: 0.7; font.family: Style.fontFamily; font.pixelSize: root.fz.caption }
@@ -1057,8 +1085,106 @@ Item {
       }
 
       // ---- samples: the palette doing its actual job
-      Column {
+      // Two complementary clips reveal actual palette changes, including the
+      // translucent grounds. Neither palette is painted under the other.
+      Item {
+        id: previews
+        property var currentTheme: null
+        property var previousTheme: null
+        property real progress: 1
+        property int direction: 1
+        property int durationMs: 240
+        property real travel: 0
+        readonly property real seam: direction > 0 ? width * (1 - progress) : width * progress
+        readonly property real drift: direction * travel * Math.pow(1 - progress, 3)
+        width: incomingSamples.width + root.sp(32)
+        height: incomingSamples.implicitHeight + root.sp(4)
+        anchors { right: parent.right; top: parent.top; rightMargin: root.sp(40); topMargin: root.sp(52) }
+        property real readingOpacity: root.previewsQuiet && !previewHover.hovered ? 0.32 : 1
+        Behavior on readingOpacity {
+          NumberAnimation { duration: root.previewsQuiet && !previewHover.hovered ? 500 : 120; easing.type: Easing.OutQuad }
+        }
+        opacity: root.chromeOpacity * readingOpacity
+        HoverHandler { id: previewHover }
+        visible: !!root.selected
+
+        function reset() {
+          paletteSweep.stop()
+          currentTheme = root.selected
+          previousTheme = null
+          progress = 1
+        }
+
+        function updateTheme() {
+          var next = root.selected
+          if (next === currentTheme) return
+          var animate = root.opened && !root.applying && !root.landing
+            && currentTheme && next && currentTheme.name !== next.name
+          paletteSweep.stop()
+          previousTheme = currentTheme
+          currentTheme = next
+          if (!animate) { progress = 1; previousTheme = null; return }
+          direction = root.scrubDir
+          durationMs = root.scrubRapid || root.scrubQuick ? 140 : 240
+          travel = root.sp(root.scrubRapid || root.scrubQuick ? 4 : 12)
+          progress = 0
+          paletteSweep.restart()
+        }
+
+        Connections {
+          target: root
+          // Let selection-derived bindings settle before taking the palette.
+          function onSelectedChanged() { Qt.callLater(previews.updateTheme) }
+          function onOpenedChanged() { previews.reset() }
+          function onApplyingChanged() { if (root.applying) previews.reset() }
+        }
+
+        NumberAnimation {
+          id: paletteSweep
+          target: previews
+          property: "progress"
+          from: 0; to: 1
+          duration: previews.durationMs
+          easing.type: Easing.Linear
+          onFinished: previews.previousTheme = null
+        }
+
+        Item {
+          x: previews.direction > 0 ? previews.seam : 0
+          width: previews.direction > 0 ? previews.width - previews.seam : previews.seam
+          height: parent.height
+          clip: true
+          SamplePanels {
+            id: incomingSamples
+            x: root.sp(16) - parent.x
+            y: 1
+            theme: previews.currentTheme
+            drift: previews.drift
+          }
+        }
+        Item {
+          x: previews.direction > 0 ? 0 : previews.seam
+          width: previews.direction > 0 ? previews.seam : previews.width - previews.seam
+          height: parent.height
+          clip: true
+          visible: previews.progress < 1
+          SamplePanels {
+            x: root.sp(16) - parent.x
+            y: 1
+            theme: previews.previousTheme
+            drift: previews.drift
+          }
+        }
+      }
+
+      component SamplePanels: Column {
         id: samples
+        property var theme: null
+        property real drift: 0
+        readonly property var ansi: Model.ansi(theme)
+        readonly property color bg: theme ? theme.colors.background || "#101315" : "#101315"
+        readonly property color fg: theme ? theme.colors.foreground || "#cacccc" : "#cacccc"
+        readonly property color accent: theme ? theme.colors.accent || fg : fg
         // Two panels, one shear. Each leans by the rake taken off its own
         // height — so their edges are parallel to each other and to the cards —
         // and each is pushed right by however much shear has accumulated below
@@ -1066,25 +1192,27 @@ Item {
         // instead of sawtoothing back out at the gap. The sizes come off the
         // panels' content and not their laid-out heights: a height that
         // included its own skew would define the skew in terms of itself.
-        readonly property int gap: root.sp(14)
-        readonly property int panelW: Math.round(root.sp(500) * root.k)
-        readonly property int hTerm: sample.implicitHeight + root.sp(28)
-        readonly property int hCode: code.implicitHeight + root.sp(28)
+        readonly property int gap: root.sp(10)
+        readonly property int padding: root.sp(10)
+        // Width between the slanted edges. Add each panel's own skew to its
+        // bounding box so the taller code sample doesn't look narrower.
+        readonly property int panelW: Math.ceil(Math.max(sample.implicitWidth, code.implicitWidth)) + padding * 2
+        readonly property int hTerm: sample.implicitHeight + padding * 2
+        readonly property int hCode: code.implicitHeight + padding * 2
         readonly property int skewTerm: Math.round(hTerm * root.rake)
         readonly property int skewCode: Math.round(hCode * root.rake)
         readonly property int xTerm: Math.round((gap + hCode) * root.rake)
-        opacity: root.chromeOpacity
-        width: panelW + xTerm
-        anchors { right: parent.right; top: parent.top; rightMargin: root.sp(56); topMargin: root.sp(52) }
+        width: panelW + skewTerm + xTerm
         spacing: gap
-        visible: !!root.selected
+        visible: !!samples.theme
 
       Item {
         id: termPanel
+        transform: Translate { x: samples.drift }
         x: samples.xTerm
-        width: samples.panelW
+        width: samples.panelW + samples.skewTerm
         height: samples.hTerm
-        visible: !!root.selected
+        visible: !!samples.theme
 
         // Filled and stroked as one path. No mask: the panel's ground is a flat
         // colour a Shape can lay down itself, and the text is inset clear of
@@ -1094,8 +1222,8 @@ Item {
           antialiasing: true
           preferredRendererType: Shape.CurveRenderer
           ShapePath {
-            fillColor: Util.alpha(root.bg, 0.88)
-            strokeColor: root.accent
+            fillColor: Util.alpha(samples.bg, 0.88)
+            strokeColor: samples.accent
             strokeWidth: 1
             startX: samples.skewTerm; startY: 0
             PathLine { x: termPanel.width; y: 0 }
@@ -1107,33 +1235,34 @@ Item {
 
         Column {
           id: sample
-          anchors { left: parent.left; right: parent.right; top: parent.top; leftMargin: root.sp(14) + samples.skewTerm; rightMargin: root.sp(14); topMargin: root.sp(14) }
-          spacing: root.sp(4)
+          anchors { left: parent.left; top: parent.top; leftMargin: samples.padding + samples.skewTerm; topMargin: samples.padding }
+          spacing: 0
           readonly property int px: root.samplePx
           readonly property string ff: Style.fontFamily
-          Text { textFormat: Text.RichText; font.family: sample.ff; font.pixelSize: sample.px; color: root.fg
-            text: '<span style="color:' + root.accent + '">❯</span> <span style="color:' + root.ansi[4] + '">~/dev/omarchy</span> <span style="color:' + root.ansi[2] + '"> main</span>' }
-          Text { textFormat: Text.RichText; font.family: sample.ff; font.pixelSize: sample.px; color: root.fg
-            text: '<span style="color:' + root.accent + '">❯</span> ls' }
-          Text { textFormat: Text.RichText; font.family: sample.ff; font.pixelSize: sample.px; color: root.fg
-            text: '<b><span style="color:' + root.ansi[4] + '">bin/</span>&nbsp;&nbsp;<span style="color:' + root.ansi[4] + '">shell/</span>&nbsp;&nbsp;<span style="color:' + root.ansi[4] + '">themes/</span></b>&nbsp;&nbsp;README.md&nbsp;&nbsp;<span style="color:' + root.ansi[2] + '">install.sh</span>' }
-          Text { textFormat: Text.RichText; font.family: sample.ff; font.pixelSize: sample.px; color: root.fg
-            text: '<span style="color:' + root.accent + '">❯</span> git status --short' }
-          Text { textFormat: Text.RichText; font.family: sample.ff; font.pixelSize: sample.px; color: root.fg
-            text: '<span style="color:' + root.ansi[1] + '">&nbsp;M</span> shell/plugins/swatch/Swatch.qml' }
-          Text { textFormat: Text.RichText; font.family: sample.ff; font.pixelSize: sample.px; color: root.fg
-            text: '<span style="color:' + root.ansi[0] + '">??</span> index.sh <span style="color:' + root.ansi[3] + '">→</span> <span style="color:' + root.ansi[5] + '">thumbs.sh</span>' }
+          Text { textFormat: Text.RichText; font.family: sample.ff; font.pixelSize: sample.px; color: samples.fg
+            text: '<span style="color:' + samples.accent + '">❯</span> <span style="color:' + samples.ansi[4] + '">~/dev/omarchy</span> <span style="color:' + samples.ansi[2] + '"> main</span>' }
+          Text { textFormat: Text.RichText; font.family: sample.ff; font.pixelSize: sample.px; color: samples.fg
+            text: '<span style="color:' + samples.accent + '">❯</span> ls' }
+          Text { textFormat: Text.RichText; font.family: sample.ff; font.pixelSize: sample.px; color: samples.fg
+            text: '<b><span style="color:' + samples.ansi[4] + '">bin/</span>&nbsp;&nbsp;<span style="color:' + samples.ansi[4] + '">shell/</span>&nbsp;&nbsp;<span style="color:' + samples.ansi[4] + '">themes/</span></b>&nbsp;&nbsp;README.md&nbsp;&nbsp;<span style="color:' + samples.ansi[2] + '">install.sh</span>' }
+          Text { textFormat: Text.RichText; font.family: sample.ff; font.pixelSize: sample.px; color: samples.fg
+            text: '<span style="color:' + samples.accent + '">❯</span> git status --short' }
+          Text { textFormat: Text.RichText; font.family: sample.ff; font.pixelSize: sample.px; color: samples.fg
+            text: '<span style="color:' + samples.ansi[1] + '">&nbsp;M</span> shell/plugins/swatch/Swatch.qml' }
+          Text { textFormat: Text.RichText; font.family: sample.ff; font.pixelSize: sample.px; color: samples.fg
+            text: '<span style="color:' + samples.ansi[0] + '">??</span> index.sh <span style="color:' + samples.ansi[3] + '">→</span> <span style="color:' + samples.ansi[5] + '">thumbs.sh</span>' }
           Row { spacing: root.sp(6)
-            Text { text: "❯"; color: root.accent; font.family: sample.ff; font.pixelSize: sample.px }
-            Rectangle { width: root.sp(8); height: sample.px + 2; color: root.accent; anchors.verticalCenter: parent.verticalCenter } }
+            Text { id: prompt; text: "❯"; color: samples.accent; font.family: sample.ff; font.pixelSize: sample.px }
+            Rectangle { width: prompt.implicitWidth; height: prompt.implicitHeight; color: samples.accent; anchors.verticalCenter: parent.verticalCenter } }
         }
       }
 
       // A small Rails model, in homage to where Omarchy comes from.
       Item {
         id: codePanel
+        transform: Translate { x: samples.drift * 0.55 }
         x: 0
-        width: samples.panelW
+        width: samples.panelW + samples.skewCode
         height: samples.hCode
 
         Shape {
@@ -1141,8 +1270,8 @@ Item {
           antialiasing: true
           preferredRendererType: Shape.CurveRenderer
           ShapePath {
-            fillColor: Util.alpha(root.bg, 0.88)
-            strokeColor: Util.alpha(root.fg, 0.35)
+            fillColor: Util.alpha(samples.bg, 0.88)
+            strokeColor: Util.alpha(samples.fg, 0.35)
             strokeWidth: 1
             startX: samples.skewCode; startY: 0
             PathLine { x: codePanel.width; y: 0 }
@@ -1154,52 +1283,84 @@ Item {
 
         Column {
           id: code
-          anchors { left: parent.left; right: parent.right; top: parent.top; leftMargin: root.sp(14) + samples.skewCode; rightMargin: root.sp(14); topMargin: root.sp(14) }
-          spacing: root.sp(4)
+          anchors { left: parent.left; top: parent.top; leftMargin: samples.padding + samples.skewCode; topMargin: samples.padding }
+          spacing: 0
           readonly property int px: root.samplePx
           readonly property string ff: Style.fontFamily
-          readonly property string kw: root.accent
-          readonly property string kon: root.ansi[1]
-          readonly property string sym: root.ansi[3]
-          readonly property string str: root.ansi[2]
-          readonly property string meth: root.ansi[4]
-          readonly property string cm: Util.alpha(root.fg, 0.5)
+          readonly property string kw: samples.accent
+          readonly property string kon: samples.ansi[1]
+          readonly property string sym: samples.ansi[3]
+          readonly property string str: samples.ansi[2]
+          readonly property string meth: samples.ansi[4]
+          readonly property string cm: Util.alpha(samples.fg, 0.5)
           readonly property string ind: "&nbsp;&nbsp;"
 
-          Text { textFormat: Text.RichText; font.family: code.ff; font.pixelSize: code.px; color: root.fg
+          Text { textFormat: Text.RichText; font.family: code.ff; font.pixelSize: code.px; color: samples.fg
             text: '<span style="color:' + code.cm + '"># app/models/theme.rb</span>' }
-          Text { textFormat: Text.RichText; font.family: code.ff; font.pixelSize: code.px; color: root.fg
+          Text { textFormat: Text.RichText; font.family: code.ff; font.pixelSize: code.px; color: samples.fg
             text: '<span style="color:' + code.kw + '">class</span> <span style="color:' + code.kon + '">Theme</span> &lt; <span style="color:' + code.kon + '">ApplicationRecord</span>' }
-          Text { textFormat: Text.RichText; font.family: code.ff; font.pixelSize: code.px; color: root.fg
+          Text { textFormat: Text.RichText; font.family: code.ff; font.pixelSize: code.px; color: samples.fg
             text: code.ind + '<span style="color:' + code.meth + '">belongs_to</span> <span style="color:' + code.sym + '">:author</span>' }
-          Text { textFormat: Text.RichText; font.family: code.ff; font.pixelSize: code.px; color: root.fg
+          Text { textFormat: Text.RichText; font.family: code.ff; font.pixelSize: code.px; color: samples.fg
             text: code.ind + '<span style="color:' + code.meth + '">has_many</span> <span style="color:' + code.sym + '">:backgrounds</span>, <span style="color:' + code.sym + '">dependent:</span> <span style="color:' + code.sym + '">:destroy</span>' }
-          Text { textFormat: Text.RichText; font.family: code.ff; font.pixelSize: code.px; color: root.fg
+          Text { textFormat: Text.RichText; font.family: code.ff; font.pixelSize: code.px; color: samples.fg
             text: code.ind + '<span style="color:' + code.meth + '">validates</span> <span style="color:' + code.sym + '">:name</span>, <span style="color:' + code.sym + '">presence:</span> <span style="color:' + code.kw + '">true</span>' }
-          Text { textFormat: Text.RichText; font.family: code.ff; font.pixelSize: code.px; color: root.fg
+          Text { textFormat: Text.RichText; font.family: code.ff; font.pixelSize: code.px; color: samples.fg
             text: code.ind + '<span style="color:' + code.meth + '">scope</span> <span style="color:' + code.sym + '">:dark</span>, -&gt; { <span style="color:' + code.meth + '">where</span>(<span style="color:' + code.sym + '">mode:</span> <span style="color:' + code.str + '">"dark"</span>) }' }
-          Text { textFormat: Text.RichText; font.family: code.ff; font.pixelSize: code.px; color: root.fg; text: "&nbsp;" }
-          Text { textFormat: Text.RichText; font.family: code.ff; font.pixelSize: code.px; color: root.fg
+          Text { textFormat: Text.RichText; font.family: code.ff; font.pixelSize: code.px; color: samples.fg; text: "&nbsp;" }
+          Text { textFormat: Text.RichText; font.family: code.ff; font.pixelSize: code.px; color: samples.fg
             text: code.ind + '<span style="color:' + code.kw + '">def</span> <span style="color:' + code.meth + '">apply!</span>' }
-          Text { textFormat: Text.RichText; font.family: code.ff; font.pixelSize: code.px; color: root.fg
+          Text { textFormat: Text.RichText; font.family: code.ff; font.pixelSize: code.px; color: samples.fg
             text: code.ind + code.ind + '<span style="color:' + code.kon + '">Shell</span>.<span style="color:' + code.meth + '">retint</span>(colors)' }
-          Text { textFormat: Text.RichText; font.family: code.ff; font.pixelSize: code.px; color: root.fg
+          Text { textFormat: Text.RichText; font.family: code.ff; font.pixelSize: code.px; color: samples.fg
             text: code.ind + code.ind + 'backgrounds.<span style="color:' + code.meth + '">first</span>&amp;.<span style="color:' + code.meth + '">set!</span>' }
-          Text { textFormat: Text.RichText; font.family: code.ff; font.pixelSize: code.px; color: root.fg
+          Text { textFormat: Text.RichText; font.family: code.ff; font.pixelSize: code.px; color: samples.fg
             text: code.ind + '<span style="color:' + code.kw + '">end</span>' }
-          Text { textFormat: Text.RichText; font.family: code.ff; font.pixelSize: code.px; color: root.fg
+          Text { textFormat: Text.RichText; font.family: code.ff; font.pixelSize: code.px; color: samples.fg
             text: '<span style="color:' + code.kw + '">end</span>' }
         }
       }
       }
 
-      // ---- mode chips (Tab cycles, click selects) and the typed filter
+      // ---- name search and category filters
       Column {
+        width: Math.max(categoryChips.implicitWidth, root.sp(320))
         opacity: root.chromeOpacity
         anchors { horizontalCenter: parent.horizontalCenter; top: parent.top; topMargin: root.sp(52) }
         spacing: root.sp(10)
 
+        // The global key handler already owns typing. This visible search
+        // surface explains that behavior without requiring a focus shortcut.
+        Rectangle {
+          width: parent.width
+          height: root.sp(36)
+          color: Util.alpha(root.bg, 0.86)
+          border.width: 1
+          border.color: root.filterText ? root.accent : Util.alpha(root.fg, 0.4)
+          Text {
+            anchors { left: parent.left; right: clearHint.left; verticalCenter: parent.verticalCenter; leftMargin: root.sp(12); rightMargin: root.sp(10) }
+            text: root.filterText ? root.filterText + "▍" : "Type to search themes…"
+            textFormat: Text.PlainText
+            elide: Text.ElideLeft
+            color: root.fg
+            opacity: root.filterText ? 1 : 0.72
+            font.family: Style.fontFamily
+            font.pixelSize: root.fz.body
+          }
+          Text {
+            id: clearHint
+            anchors { right: parent.right; verticalCenter: parent.verticalCenter; rightMargin: root.sp(12) }
+            text: root.filterText ? "Esc clear" : ""
+            color: root.fg
+            opacity: 0.6
+            font.family: Style.fontFamily
+            font.pixelSize: root.fz.caption
+          }
+          MouseArea { anchors.fill: parent; onClicked: keys.forceActiveFocus() }
+        }
+
         Row {
+          id: categoryChips
           anchors.horizontalCenter: parent.horizontalCenter
           spacing: root.sp(6)
           Repeater {
@@ -1229,11 +1390,11 @@ Item {
 
         Text {
           anchors.horizontalCenter: parent.horizontalCenter
-          visible: root.filterText.length > 0
-          text: root.filterText + "▍"
+          text: "Tab to cycle categories"
           color: root.fg
           font.family: Style.fontFamily
-          font.pixelSize: root.fz.heading
+          font.pixelSize: root.fz.caption
+          opacity: 0.7
           style: Text.Outline
           styleColor: Util.alpha(root.bg, 0.7)
         }
@@ -1323,15 +1484,16 @@ Item {
         id: stripArea
         opacity: root.chromeOpacity
         anchors { left: parent.left; right: parent.right; bottom: parent.bottom; bottomMargin: root.sp(44) }
-        // Slack above and below the cards: the live one lifts out of the strip
-        // and the gate sits around it, and the ListView clips, so this is what
-        // keeps the scaled card and its shadow whole.
-        height: root.thumbH + root.sp(52)
+        // Size for the enlarged card, plus room on both sides for its shadow
+        // and gate. Every card shares the same vertical centerline.
+        height: Math.ceil(thumbH * liveScale) + root.sp(52)
 
         readonly property int thumbW: root.thumbW
         readonly property int thumbH: root.thumbH
-        readonly property real liveScale: 1.06
-        readonly property int lift: root.sp(7)
+        readonly property real liveScale: 1.24
+        readonly property real idleScale: 0.92
+        // Match the cell to the resting artwork so spacing is the visible gap.
+        readonly property int cellW: Math.round(thumbW * idleScale)
         // The cards are parallelograms, the way the stock image picker's slices
         // are: the top edge leads the bottom, so the gaps between cards become
         // parallel slanted bands and the strip reads as film running past
@@ -1343,12 +1505,12 @@ Item {
           anchors.fill: parent
           orientation: ListView.Horizontal
           model: root.rows
-          spacing: root.sp(12)
+          spacing: root.sp(4)
           clip: true
           currentIndex: root.selectedIndex
           highlightRangeMode: ListView.StrictlyEnforceRange
-          preferredHighlightBegin: width / 2 - stripArea.thumbW / 2
-          preferredHighlightEnd: width / 2 + stripArea.thumbW / 2
+          preferredHighlightBegin: width / 2 - stripArea.cellW / 2
+          preferredHighlightEnd: width / 2 + stripArea.cellW / 2
           highlightMoveDuration: 160
           highlightFollowsCurrentItem: true
           cacheBuffer: stripArea.thumbW * 12
@@ -1361,8 +1523,8 @@ Item {
             required property int index
             required property var modelData
             readonly property bool selected: index === root.selectedIndex
-            readonly property int pad: root.sp(22)
-            width: stripArea.thumbW
+            readonly property int pad: Math.ceil((stripArea.thumbW * stripArea.liveScale - stripArea.cellW) / 2) + root.sp(24)
+            width: stripArea.cellW
             height: strip.height
             z: selected ? 2 : 0          // the lifted card, and its shadow, over its neighbours
 
@@ -1387,13 +1549,13 @@ Item {
 
               Item {
                 id: card
-                x: cell.pad
-                y: Math.round((lifted.height - height) / 2) - (cell.selected ? stripArea.lift : 0)
+                x: cell.pad + (cell.width - width) / 2
+                y: (lifted.height - height) / 2
                 width: stripArea.thumbW
                 height: stripArea.thumbH
-                scale: cell.selected ? stripArea.liveScale : 0.92
+                transformOrigin: Item.Center
+                scale: cell.selected ? stripArea.liveScale : stripArea.idleScale
                 Behavior on scale { NumberAnimation { duration: 140; easing.type: Easing.OutQuad } }
-                Behavior on y { NumberAnimation { duration: 140; easing.type: Easing.OutQuad } }
 
                 // Everything the card is made of goes through the mask, so the
                 // artwork stays upright inside a slanted frame — shearing the
@@ -1439,13 +1601,21 @@ Item {
                   Rectangle {
                     anchors.fill: parent
                     color: root.bg
-                    opacity: cell.selected ? 0 : 0.42
+                    opacity: cell.selected ? 0 : 0.18
                     Behavior on opacity { NumberAnimation { duration: 140 } }
                   }
                   Row {
                     anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
                     height: root.sp(4)
-                    Repeater { model: Model.ansi(cell.modelData); Rectangle { required property var modelData; width: cell.width / 6; height: root.sp(4); color: modelData } }
+                    Repeater {
+                      model: Model.ansi(cell.modelData)
+                      Rectangle {
+                        required property var modelData
+                        width: card.width / 6
+                        height: root.sp(4)
+                        color: modelData
+                      }
+                    }
                   }
                   Text {
                     anchors { left: parent.left; bottom: parent.bottom; leftMargin: root.sp(8); bottomMargin: root.sp(9) }
@@ -1479,7 +1649,9 @@ Item {
               }
             }
             MouseArea {
-              anchors.fill: parent
+              width: cell.selected ? card.width * card.scale : cell.width
+              height: parent.height
+              anchors.centerIn: parent
               onClicked: { root.selectedIndex = cell.index; root.bgIndex = 0 }
               onDoubleClicked: { root.selectedIndex = cell.index; root.apply() }
             }
@@ -1506,7 +1678,7 @@ Item {
           width: Math.round(stripArea.thumbW * stripArea.liveScale) + root.sp(20)
           height: Math.round(stripArea.thumbH * stripArea.liveScale) + root.sp(20)
           x: Math.round((stripArea.width - width) / 2)
-          y: Math.round((stripArea.height - height) / 2) - stripArea.lift
+          y: Math.round((stripArea.height - height) / 2)
 
           readonly property int t: root.sp(2)
           readonly property int armW: root.sp(26)
@@ -1579,7 +1751,7 @@ Item {
         anchors { right: parent.right; bottom: parent.bottom; rightMargin: root.sp(56); bottomMargin: root.sp(14) }
         spacing: root.sp(18)
         Repeater {
-          model: ["← → theme", "↑ ↓ background", "type to filter", "Tab filter", "⏎ apply", "Esc cancel"]
+          model: ["← → theme", "↑ ↓ background", "type to search", "Tab category", "⏎ apply", "Esc cancel"]
           Text { required property string modelData; text: modelData; color: root.fg; opacity: 0.75; font.family: Style.fontFamily; font.pixelSize: root.fz.caption }
         }
       }
@@ -1598,9 +1770,17 @@ Item {
 
   readonly property int thumbW: root.sp(188)
   readonly property int thumbH: root.sp(106)
-  readonly property int bgThumbW: root.sp(150)
-  readonly property int bgThumbH: root.sp(84)
-  readonly property int bgStripH: root.sp(84) * 4 + root.sp(8) * 3
+  readonly property int paletteSwatchW: Math.round(root.sp(38) * Math.sqrt(root.k))
+  // The label starts on the palette's right edge, leaving its usual text gap.
+  readonly property int bgThumbW: paletteSwatchW * 6 - root.sp(14)
+  readonly property int bgThumbH: Math.round(bgThumbW * 9 / 16)
+  // Whole cards only, with a gap before the bottom theme strip. Reduce the
+  // visible count on shorter screens instead of slicing through a thumbnail.
+  readonly property int bgVisibleCount: Math.max(1, Math.min(3,
+    selected ? selected.backgrounds.length : 1,
+    Math.floor((stripArea.y - root.sp(24) - (titleBlock.y + bgArea.y) + root.sp(8))
+      / (bgThumbH + root.sp(8)))))
+  readonly property int bgStripH: bgThumbH * bgVisibleCount + root.sp(8) * (bgVisibleCount - 1)
 
   // Keep the index warm so the first open doesn't wait on a cold walk.
   Component.onCompleted: { freezeMetrics(); indexProc.running = true }

@@ -38,7 +38,6 @@ Requires `jq`, `vips` and `python3` (all ship with Omarchy). Wallpaper previews 
 | `←` `→` | Previous / next theme |
 | `↑` `↓` | Cycle the theme's backgrounds |
 | `PgUp` `PgDn` `Home` `End` | Jump |
-| hold `Space` | Hide the interface to inspect the wallpaper (when the filter is empty) |
 | type | Filter by name |
 | `Tab` | Cycle the filter chips: All → Dark → Light → Installed → Stock (or click one) |
 | `Enter` / double-click | Apply (`omarchy theme set`, plus `bg set` if you picked a background) |
