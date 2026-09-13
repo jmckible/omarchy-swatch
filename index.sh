@@ -24,6 +24,16 @@ user_themes=$HOME/.config/omarchy/themes
 user_bgs=$HOME/.config/omarchy/backgrounds
 stock_themes=${OMARCHY_PATH:-$HOME/.local/share/omarchy}/themes
 state=$HOME/.local/state/omarchy/current
+# With the inventory already in QML, opening only needs the live selection.
+# This path does not touch the inventory, generate assets, or walk themes.
+if [[ ${1:-} == --selection ]]; then
+  current_theme=$(read_bounded "$state/theme.name" 256 2>/dev/null | tr -d '\n' || true)
+  current_bg=$(readlink -f -- "$state/background" 2>/dev/null || true)
+  (( ${#current_bg} <= MAX_PATH_BYTES )) || current_bg=""
+  jq -n --arg theme "$current_theme" --arg bg "$current_bg" \
+    '{currentTheme: $theme, currentBackground: $bg}'
+  exit
+fi
 mkdir -p "$thumbs"
 
 # Private scratch for this run: TOML snapshots and the legacy-theme conversion.
@@ -98,6 +108,22 @@ stage_size() {
   [[ $w =~ ^[0-9]+$ && $h =~ ^[0-9]+$ ]] && (( w >= 320 && w <= 7680 && h >= 200 && h <= 4320 )) || { w=2560; h=1440; }
   printf '%s %s' "$w" "$h"
 }
+
+# Opening uses the bounded inventory already on disk, with live desktop state.
+# A full inventory refresh runs separately; an absent/partial cache falls through.
+if [[ ${1:-} == --cached ]] && jq -e '.version == 2 and .partial == false and (.themes | length > 0)' <<<"$prev" >/dev/null 2>&1; then
+  current_theme=$(read_bounded "$state/theme.name" 256 2>/dev/null | tr -d '\n' || true)
+  current_bg=$(readlink -f -- "$state/background" 2>/dev/null || true)
+  if jq -e --arg name "$current_theme" '.themes | any(.name == $name)' <<<"$prev" >/dev/null 2>&1; then
+    read -r stage_w stage_h < <(stage_size)
+    json=$(jq --arg theme "$current_theme" --arg bg "$current_bg" --argjson w "$stage_w" --argjson h "$stage_h" \
+      '.currentTheme = $theme | .currentBackground = $bg | .stageW = $w | .stageH = $h' <<<"$prev")
+    if (( $(printf '%s\n' "$json" | wc -c) <= MAX_INDEX_BYTES )); then
+      printf '%s\n' "$json"
+      exit 0
+    fi
+  fi
+fi
 
 resolve() {
   local path=$1 src=$2 name=${1##*/}

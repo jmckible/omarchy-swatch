@@ -69,6 +69,8 @@ Item {
   property string scrubAxis: "theme"
   property int scrubDir: 1
   property bool scrubArmed: false
+  property bool viewReady: false
+  property bool rebuilding: false
   // True from open() until the first wallpaper has actually been shown, so
   // that one hand-off is a cut rather than a transition. See the slot Behavior.
   property bool landing: false
@@ -144,7 +146,7 @@ Item {
   // once. It is far below wipeMs, so by the time the wipe finishes the clip is
   // usually already moving.
   readonly property string selectedVideoKey: Model.videoKeyAt(selected, bgIndex)
-  readonly property bool videoAvailable: selectedVideoKey !== "" && !applying && opened
+  readonly property bool videoAvailable: selectedVideoKey !== "" && !applying && opened && viewReady
   // Loading starts the moment a deliberate move lands, with no delay, so the
   // ~115 ms it takes runs *underneath* the arming delay instead of after it.
   // Suppressed mid-burst: a held arrow is scrubRapid the whole way, so nothing
@@ -227,9 +229,10 @@ Item {
     scrubArmed = false
     scrubQuick = false
     scrubRapid = false   // a stale burst flag would suppress the first clip load
+    viewReady = false
     landing = true       // the first wallpaper of this open is a cut, not a fade
     wipeRun.stop(); wiping = false; wipeFrom = ""
-    stage.opacity = 1
+    stage.opacity = 0
     wallpaperLayer.scale = 1
     freezeMetrics()
     searching = false
@@ -241,13 +244,7 @@ Item {
     favoritesOnly = preferences.favorites.indexOf(currentTheme) !== -1
     curatedThemes = Model.curate(themes, preferences, false, showHidden)
     curationMessage = ""
-    if (!preferencesProc.running) {
-      preferencesReady = false
-      preferencesProc.nextUndo = undoHide
-      preferencesProc.successMessage = ""
-      preferencesProc.command = ["python3", scriptPath("preferences.py"), "read"]
-      preferencesProc.running = true
-    }
+    readPreferences()
     opened = true
     // Land on the current theme from the previous open's index before asking
     // for a fresh one. selectedIndex survives close(), and indexProc is async,
@@ -256,7 +253,10 @@ Item {
     // theme", and long enough for that stale selection to start playing its
     // clip. Runs after `opened` so the dwell arms against the real landing.
     if (themes.length) rebuild(true)
-    indexProc.running = true
+    if (themes.length) selectionProc.running = true
+    else indexProc.running = true
+    openingDeadline.restart()
+    openingPoll.start()
     Qt.callLater(function() { keys.forceActiveFocus() })
   }
 
@@ -266,6 +266,9 @@ Item {
     if (pickDir && !applying) finishPick("")
     cancelExit()
     opened = false
+    openingPoll.stop()
+    openingDeadline.stop()
+    viewReady = false
   }
 
   function dismiss() {
@@ -279,8 +282,79 @@ Item {
   // this collector never holds more than that.
   Process {
     id: indexProc
-    command: [root.scriptPath("index.sh")]
+    command: [root.scriptPath("index.sh"), "--cached"]
+    onExited: { if (!refreshProc.running) refreshProc.running = true }
     stdout: StdioCollector { waitForEnd: true; onStreamFinished: root.loadIndex(text) }
+  }
+
+  Process {
+    id: selectionProc
+    command: [root.scriptPath("index.sh"), "--selection"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var state
+        try { state = JSON.parse(text) } catch (e) { indexProc.running = true; return }
+        var theme = Model.findByName(root.themes, state.currentTheme)
+        if (!theme || (state.currentBackground && Model.backgroundIndexOf(theme, state.currentBackground) < 0)) {
+          if (!refreshProc.running) refreshProc.running = true
+          return
+        }
+        root.currentTheme = state.currentTheme
+        root.currentBackground = state.currentBackground
+        root.openingIndexReady = true
+        root.settleOpeningFavorites()
+        root.curatedThemes = Model.curate(root.themes, root.preferences, false, root.showHidden)
+        root.rebuild(true)
+        if (!refreshProc.running) refreshProc.running = true
+      }
+    }
+  }
+
+  Process {
+    id: refreshProc
+    command: [root.scriptPath("index.sh")]
+    stdout: StdioCollector { waitForEnd: true; onStreamFinished: root.loadIndex(text, true) }
+  }
+
+  // Keep the desktop visible until both lists and the full-size still are in
+  // place. Only the opening acknowledgement is visible during preparation.
+  Timer {
+    id: openingPoll
+    interval: 16
+    repeat: true
+    onTriggered: root.revealOpening(false)
+  }
+  Timer { id: openingDeadline; interval: 5000; onTriggered: root.revealOpening(true) }
+  function revealOpening(fallback) {
+    if (!opened || viewReady) return
+    var slot = slots.indexOf(selectedKey)
+    var item = slot < 0 ? null : wallpapers.itemAt(slot)
+    if (!fallback && (!openingIndexReady || !preferencesReady || rebuilding
+        || (selectedKey && (!item || !item.fullReady)))) return
+    strip.forceLayout()
+    bgStrip.forceLayout()
+    if (selectedIndex >= 0) strip.positionViewAtIndex(selectedIndex, ListView.Center)
+    if (bgIndex >= 0) bgStrip.positionViewAtIndex(bgIndex, ListView.Beginning)
+    if (item && item.ready) setShown(selectedKey)
+    Qt.callLater(function() {
+      if (!root.opened) return
+      stage.opacity = 1
+      root.viewReady = true
+      root.landing = false
+      root.scrubArmed = true
+      openingPoll.stop()
+      openingDeadline.stop()
+    })
+  }
+
+  function readPreferences() {
+    if (preferencesProc.running) return
+    preferencesReady = false
+    preferencesProc.nextUndo = undoHide
+    preferencesProc.successMessage = ""
+    preferencesProc.command = ["python3", scriptPath("preferences.py"), "read"]
+    preferencesProc.running = true
   }
 
   Process {
@@ -345,7 +419,7 @@ Item {
     if (undoHide) saveChoice("hidden", undoHide.name, false, undoHide.key, null, "")
   }
 
-  function curationStatus() { return JSON.stringify({available: true, ready: preferencesReady, favorites: preferences.favorites.length}) }
+  function curationStatus() { return JSON.stringify({available: true, ready: preferencesReady, favorites: preferences.favorites.length, viewReady: viewReady}) }
 
   function recurate() {
     curatedThemes = Model.curate(themes, preferences, false, showHidden)
@@ -413,7 +487,7 @@ Item {
   // Derivatives land while thumbs.sh runs; tick so images that were missing retry.
   Timer { running: thumbsProc.running; interval: 2000; repeat: true; onTriggered: root.cacheGen += 1 }
 
-  function loadIndex(raw) {
+  function loadIndex(raw, refresh) {
     if (!raw) return
     var parsed
     try { parsed = JSON.parse(raw) } catch (e) { console.warn("swatch: index parse failed:", e); return }
@@ -428,7 +502,8 @@ Item {
     openingIndexReady = true
     settleOpeningFavorites()
     curatedThemes = Model.curate(themes, preferences, false, showHidden)
-    rebuild(true)
+    rebuild(!refresh || !opened || !viewReady)
+    stageBackground()
     if (!thumbsProc.running) thumbsProc.running = true
   }
 
@@ -436,6 +511,7 @@ Item {
   // its current background so the first frame is the desktop you already have.
   function rebuild(landOnCurrent, transitioning) {
     if (!transitioning) resetCollectionTransition()
+    rebuilding = true
     var keep = selected ? selected.name : ""
     var keepBackground = selectedBackground
     rows = Model.browse(curatedThemes, filterText, "all", favoritesOnly)
@@ -452,7 +528,14 @@ Item {
       var nextBackground = nextTheme && keep === nextTheme.name ? Model.backgroundIndexOf(nextTheme, keepBackground) : -1
       bgIndex = nextBackground === -1 ? 0 : nextBackground
     }
-    Qt.callLater(function() { if (selectedIndex >= 0) strip.positionViewAtIndex(selectedIndex, ListView.Center) })
+    Qt.callLater(function() {
+      strip.forceLayout()
+      bgStrip.forceLayout()
+      if (selectedIndex >= 0) strip.positionViewAtIndex(selectedIndex, ListView.Center)
+      if (!viewReady && bgIndex >= 0) bgStrip.positionViewAtIndex(bgIndex, ListView.Beginning)
+      rebuilding = false
+      stageBackground()
+    })
   }
 
   // ---------------------------------------------------------------- navigation
@@ -624,7 +707,7 @@ Item {
     if (!key || key === shownKey) return
     var prev = shownKey
     wipeFrom = prev
-    var moving = opened && !applying && scrubArmed && !!prev
+    var moving = opened && viewReady && !applying && scrubArmed && !!prev
     var wipe = moving && !scrubQuick && !wiping
     if (wipe) {
       wipeT = 1 + wipeSpread
@@ -639,7 +722,7 @@ Item {
     scrubArmed = true          // the first key of an open is a landing, not a move
     // Cleared only after the instant swap has been applied, so the very next
     // move animates normally.
-    if (landing) Qt.callLater(function() { root.landing = false })
+    if (landing && viewReady) Qt.callLater(function() { root.landing = false })
     if (wipe) wipeRun.restart()
   }
 
@@ -649,7 +732,7 @@ Item {
 
   function previewSelected() {
     var t = selected
-    if (!t || !livePreview || !opened) return
+    if (!t || !livePreview || !opened || !viewReady) return
     applyPalette(t.colorsToml, t.shellToml)
   }
 
@@ -924,6 +1007,7 @@ Item {
             id: slotItem
             required property int index
             readonly property string key: root.slots[index]
+            readonly property bool fullReady: stageImg.status === Image.Ready
             readonly property bool ready: stageImg.status === Image.Ready || softImg.status === Image.Ready
             readonly property bool incoming: key && key === root.shownKey
             readonly property bool outgoing: root.wiping && key && key === root.wipeFrom
@@ -1055,6 +1139,7 @@ Item {
           event.accepted = true
           if (root.applying) return          // committed; the exit is running
           var k = event.key
+          if (!root.viewReady) { if (k === Qt.Key_Escape) root.dismiss(); return }
           if (event.modifiers === Qt.ControlModifier && k === Qt.Key_F) root.toggleFavoritesOnly()
           else if (!root.searching && event.modifiers === Qt.NoModifier && k === Qt.Key_F) root.toggleFavorite()
           else if ((event.modifiers & Qt.ControlModifier) && k === Qt.Key_H) root.toggleShowHidden()
@@ -1114,7 +1199,7 @@ Item {
             opacity: root.selected && root.selected.favorite ? 1 : 0
             scale: opacity > 0 ? 1 : 0.65
             Behavior on opacity { NumberAnimation { duration: 150 } }
-            Behavior on scale { NumberAnimation { duration: 200; easing.type: Easing.OutCubic } }
+            Behavior on scale { enabled: root.viewReady && !root.rebuilding; NumberAnimation { duration: 200; easing.type: Easing.OutCubic } }
           }
         }
         Row {
@@ -1174,12 +1259,12 @@ Item {
             highlightRangeMode: ListView.StrictlyEnforceRange
             preferredHighlightBegin: 0
             preferredHighlightEnd: root.bgThumbH
-            highlightMoveDuration: 140
+            highlightMoveDuration: root.viewReady && !root.rebuilding ? 140 : 0
             cacheBuffer: root.bgThumbH * 8
             reuseItems: true
             boundsBehavior: Flickable.StopAtBounds
             onCurrentIndexChanged: {
-              if (currentIndex >= 0 && currentIndex !== root.bgIndex) root.bgIndex = currentIndex
+              if (!root.rebuilding && root.viewReady && currentIndex >= 0 && currentIndex !== root.bgIndex) root.bgIndex = currentIndex
             }
 
             delegate: Item {
@@ -1201,7 +1286,7 @@ Item {
                 transformOrigin: Item.Center
                 scale: bgCell.sel ? 1.0 : 0.88
                 Behavior on opacity { NumberAnimation { duration: 120 } }
-                Behavior on scale { NumberAnimation { duration: 120 } }
+                Behavior on scale { enabled: root.viewReady && !root.rebuilding; NumberAnimation { duration: 120 } }
 
                 Item {
                   anchors.fill: parent
@@ -1720,12 +1805,12 @@ Item {
           highlightRangeMode: ListView.StrictlyEnforceRange
           preferredHighlightBegin: width / 2 - stripArea.cellW / 2
           preferredHighlightEnd: width / 2 + stripArea.cellW / 2
-          highlightMoveDuration: 160
+          highlightMoveDuration: root.viewReady && !root.rebuilding ? 160 : 0
           highlightFollowsCurrentItem: true
           cacheBuffer: stripArea.thumbW * 12
           reuseItems: true
           boundsBehavior: Flickable.StopAtBounds
-          onCurrentIndexChanged: if (currentIndex !== root.selectedIndex && currentIndex >= 0) { root.selectedIndex = currentIndex; root.bgIndex = 0 }
+          onCurrentIndexChanged: if (!root.rebuilding && root.viewReady && currentIndex !== root.selectedIndex && currentIndex >= 0) { root.selectedIndex = currentIndex; root.bgIndex = 0 }
 
           delegate: Item {
             id: cell
@@ -1764,7 +1849,7 @@ Item {
                 height: stripArea.thumbH
                 transformOrigin: Item.Center
                 scale: cell.selected ? stripArea.liveScale : stripArea.idleScale
-                Behavior on scale { NumberAnimation { duration: 140; easing.type: Easing.OutQuad } }
+                Behavior on scale { enabled: root.viewReady && !root.rebuilding; NumberAnimation { duration: 140; easing.type: Easing.OutQuad } }
 
                 // Everything the card is made of goes through the mask, so the
                 // artwork stays upright inside a slanted frame — shearing the
@@ -1966,6 +2051,40 @@ Item {
       }
     }
 
+    // Acknowledge the shortcut on the first frame, independently of the index
+    // and image decoders. No minimum hold or animation delays the ready view.
+    Item {
+      anchors.fill: parent
+      visible: root.opened && !root.viewReady
+      Rectangle {
+        anchors.fill: parent
+        color: Util.alpha(Color.background, 0.22)
+      }
+      // Invisible picker controls must not receive clicks during preparation.
+      MouseArea { anchors.fill: parent; onClicked: root.dismiss() }
+      Rectangle {
+        anchors {
+          horizontalCenter: parent.horizontalCenter
+          bottom: parent.bottom
+          bottomMargin: root.sp(70)
+        }
+        width: openingLabel.implicitWidth + root.sp(40)
+        height: root.sp(44)
+        radius: root.sp(8)
+        color: Color.background
+        border.color: Util.alpha(Color.accent, 0.5)
+        border.width: 1
+        Text {
+          id: openingLabel
+          anchors.centerIn: parent
+          text: "Opening Swatch…"
+          color: Color.foreground
+          font.family: Style.fontFamily
+          font.pixelSize: root.fz.body
+        }
+      }
+    }
+
     // Outside the stage so it is unaffected by the stage's blur layer: the
     // black is the cut itself, not something being defocused along with the
     // picture underneath it.
@@ -1997,5 +2116,5 @@ Item {
     Math.max(bgThumbH, stripArea.y - root.sp(24) - (titleBlock.y + bgArea.y)))
 
   // Keep the index warm so the first open doesn't wait on a cold walk.
-  Component.onCompleted: { freezeMetrics(); indexProc.running = true }
+  Component.onCompleted: { freezeMetrics(); readPreferences(); indexProc.running = true }
 }

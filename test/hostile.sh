@@ -114,6 +114,23 @@ start=$SECONDS; idx2=$("$here/index.sh"); warm=$((SECONDS - start))
 check "warm run identical"     "$(jq -S . <<<"$idx" | md5sum)" "$(jq -S . <<<"$idx2" | md5sum)"
 echo "     cold ${cold}s, warm ${warm}s"
 
+echo "--- cached opening uses live selection"
+printf 'stockonly\n' >"$HOME/.local/state/omarchy/current/theme.name"
+ln -s "$S/stockonly/backgrounds/s.png" "$HOME/.local/state/omarchy/current/background"
+cached=$("$here/index.sh" --cached)
+check "cached opening refreshes theme" "$(jq -r '.currentTheme' <<<"$cached")" stockonly
+check "cached opening refreshes background" "$(jq -r '.currentBackground' <<<"$cached")" "$S/stockonly/backgrounds/s.png"
+check "cached opening retains inventory" "$(jq -S '.themes' <<<"$cached" | md5sum)" "$(jq -S '.themes' <<<"$idx2" | md5sum)"
+selection=$("$here/index.sh" --selection)
+check "selection-only matches live desktop" "$(jq -S . <<<"$selection" | md5sum)" "$(jq -S '{currentTheme, currentBackground}' <<<"$cached" | md5sum)"
+# The lightweight path must remain independent of even an unreadable inventory.
+selection_no_cache=$(XDG_CACHE_HOME="$T/no-cache" "$here/index.sh" --selection)
+check "selection-only needs no cache" "$selection_no_cache" "$selection"
+check "selection-only creates no cache" "$(test -e "$T/no-cache" && echo created || echo absent)" absent
+
+printf 'good\n' >"$HOME/.local/state/omarchy/current/theme.name"
+rm "$HOME/.local/state/omarchy/current/background"
+
 echo "--- stage size from the compositor"
 sz="$(q '.stageW'),$(q '.stageH')"
 check "no compositor here → default" "$sz" "2560,1440"
