@@ -29,6 +29,55 @@ function filter(themes, text, mode) {
   return out
 }
 
+// Search spans the collection; saved browsing filters resume when it clears.
+function browse(themes, text, mode, favoritesOnly) {
+  if (text) return filter(themes, text, "all")
+  var collection = favoritesOnly ? themes.filter(function(theme) { return theme.favorite }) : themes
+  return filter(collection, "", mode)
+}
+
+// Personal choices project the index without changing its cached records. All
+// background arrays are projected together so video/still pairing survives.
+function backgroundId(path) {
+  return (String(path).indexOf("/omarchy/backgrounds/") !== -1 ? "extra:" : "theme:") + baseName(path)
+}
+
+function isHidden(preferences, name, path) {
+  var map = preferences.hidden || {}
+  var hidden = Object.prototype.hasOwnProperty.call(map, name) ? map[name] : []
+  return hidden.indexOf(backgroundId(path)) !== -1
+}
+
+function curate(themes, preferences, favoritesOnly, showHidden) {
+  var favorites = preferences.favorites || []
+  var result = []
+  for (var i = 0; i < themes.length; i++) {
+    var theme = themes[i]
+    if (favoritesOnly && favorites.indexOf(theme.name) === -1) continue
+    var row = Object.assign({}, theme)
+    row.favorite = favorites.indexOf(theme.name) !== -1
+    var hiddenMap = preferences.hidden || {}
+    var hidden = Object.prototype.hasOwnProperty.call(hiddenMap, theme.name) ? hiddenMap[theme.name] : []
+    if (!hidden.length) { result.push(row); continue }
+    var indices = []
+    var backgrounds = theme.backgrounds || []
+    for (var j = 0; j < backgrounds.length; j++)
+      if (showHidden || !isHidden(preferences, theme.name, backgrounds[j])) indices.push(j)
+    // Upstream can remove the only unhidden wallpaper; keep a usable fallback.
+    if (!indices.length && backgrounds.length) indices.push(0)
+    ;["backgrounds", "bgKeys", "bgVideos", "bgVideoKeys"].forEach(function(field) {
+      row[field] = indices.map(function(index) { return (theme[field] || [])[index] || "" })
+    })
+    if (!showHidden && isHidden(preferences, theme.name, theme.preview)) {
+      row.preview = row.backgrounds[0] || ""
+      row.previewKey = row.bgKeys[0] || ""
+    }
+    row.hiddenCount = backgrounds.filter(function(path) { return isHidden(preferences, theme.name, path) }).length
+    result.push(row)
+  }
+  return result
+}
+
 var MODES = ["all", "dark", "light", "installed", "stock"]
 
 function nextMode(mode) {
@@ -124,5 +173,5 @@ function ansi(theme) {
 }
 
 if (typeof module !== "undefined") {
-  module.exports = { matches: matches, filter: filter, nextMode: nextMode, indexOf: indexOf, findByName: findByName, clamp: clamp, wrap: wrap, backgroundAt: backgroundAt, backgroundIndexOf: backgroundIndexOf, keyAt: keyAt, thumbPath: thumbPath, stagePath: stagePath, videoKeyAt: videoKeyAt, videoPath: videoPath, hasVideo: hasVideo, ansi: ansi, MODES: MODES }
+  module.exports = { browse: browse, curate: curate, backgroundId: backgroundId, isHidden: isHidden, matches: matches, filter: filter, nextMode: nextMode, indexOf: indexOf, findByName: findByName, clamp: clamp, wrap: wrap, backgroundAt: backgroundAt, backgroundIndexOf: backgroundIndexOf, keyAt: keyAt, thumbPath: thumbPath, stagePath: stagePath, videoKeyAt: videoKeyAt, videoPath: videoPath, hasVideo: hasVideo, ansi: ansi, MODES: MODES }
 }

@@ -104,3 +104,33 @@ assert.equal(Model.videoPath("/c", ""), "")
 assert.equal(Model.videoPath("", "2222222222222222"), "")
 
 console.log("ok")
+
+// Curation preserves the source index and video alignment, across cache changes.
+const prefs = { favorites: ['gruvbox'], hidden: { gruvbox: ['theme:1.jpg'] } }
+const curated = Model.curate([V], prefs, true, false)[0]
+assert.deepEqual(curated.backgrounds, ['/b/2.jpg', '/b/3.jpg'])
+assert.deepEqual(curated.bgVideoKeys, ['2222222222222222', ''])
+assert.equal(Model.backgroundAt(curated, 0), '/b/2.jpg')
+assert.equal(Model.hasVideo(curated, 0), true)
+assert.equal(V.backgrounds.length, 3)
+assert.equal(Model.curate([V], {favorites: [], hidden: {}}, true, false).length, 0)
+assert.equal(Model.curate([V], prefs, false, true)[0].backgrounds.length, 3)
+assert.equal(Model.isHidden(prefs, 'gruvbox', '/different/root/1.jpg'), true)
+assert.equal(Model.backgroundId('/home/u/.config/omarchy/backgrounds/gruvbox/1.jpg'), 'extra:1.jpg')
+assert.equal(Model.isHidden(prefs, 'gruvbox', '/home/u/.config/omarchy/backgrounds/gruvbox/1.jpg'), false)
+assert.equal(Model.isHidden({hidden: {}}, 'constructor', '/b/1.jpg'), false)
+const allHidden = {favorites: [], hidden: {gruvbox: ['theme:1.jpg', 'theme:2.jpg', 'theme:3.jpg']}}
+assert.deepEqual(Model.curate([V], allHidden, false, false)[0].backgrounds, ['/b/1.jpg'])
+const previewHidden = {...V, preview: '/b/1.jpg', previewKey: 'old'}
+assert.equal(Model.curate([previewHidden], prefs, false, false)[0].previewKey, '2222222222222222')
+assert.equal(Model.filter(Model.curate([V, ...T], prefs, true, false), '', 'light').length, 0)
+
+// Name searches bypass both browsing filters without losing hidden backgrounds.
+const searchCollection = Model.curate(T, {
+  favorites: ['tokyo-night'], hidden: {'tokyo-night': ['theme:1.jpg']}
+}, false, false)
+assert.deepEqual(Model.browse(searchCollection, 'rose', 'dark', true).map(t => t.name), ['rose-pine'])
+assert.deepEqual(Model.browse(searchCollection, 'last', 'stock', true).map(t => t.name), ['last-call'])
+assert.deepEqual(Model.browse(searchCollection, '', 'dark', true).map(t => t.name), ['tokyo-night'])
+assert.deepEqual(Model.browse(searchCollection, 'tokyo', 'light', false)[0].backgrounds, ['/b/2.jpg'])
+assert.deepEqual(Model.browse(searchCollection, '', 'light', true), [])

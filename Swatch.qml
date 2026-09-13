@@ -22,11 +22,27 @@ Item {
   readonly property string home: Quickshell.env("HOME")
 
   // Index and view state.
+  property var preferences: ({version: 1, favorites: [], hidden: {}})
+  property bool preferencesReady: false
+  property real collectionOpacity: 1
+  property real collectionOffset: 0
+  property bool favoritesOnly: false
+  property bool openingIndexReady: false
+  property bool openingFavoritesSettled: false
+  property bool showHidden: false
+  readonly property int selectedHiddenCount: selected ? (selected.hiddenCount || 0) : 0
+  readonly property int hiddenFooterHeight: selectedHiddenCount > 0 && !showHidden ? root.sp(30) : 0
+  property string curationMessage: ""
+  onCurationMessageChanged: if (curationMessage) curationNotice.restart()
+  Timer { id: curationNotice; interval: 5000; onTriggered: root.curationMessage = "" }
+  property var undoHide: null
+  readonly property bool backgroundHidden: !!selected && Model.isHidden(preferences, selected.name, selectedBackground)
+  property var curatedThemes: []
   property var themes: []
   property string loadedIndex: ""
   property var rows: []
+  property bool searching: false
   property string filterText: ""
-  property string modeFilter: "all"
   property int selectedIndex: -1
   property int bgIndex: 0
   property string currentTheme: ""
@@ -200,6 +216,7 @@ Item {
     try { args = JSON.parse(payloadJson || "{}") || {} } catch (e) { args = {} }
     pickDir = String(args.dir || "")
     cancelExit()
+    resetCollectionTransition()
     applying = false
     applyTarget = ""
     chromeOpacity = 1
@@ -215,8 +232,22 @@ Item {
     stage.opacity = 1
     wallpaperLayer.scale = 1
     freezeMetrics()
+    searching = false
     filterText = ""
-    modeFilter = "all"
+    showHidden = false
+    openingIndexReady = false
+    openingFavoritesSettled = false
+    // Use cached state for the first frame, then reconcile both async reads.
+    favoritesOnly = preferences.favorites.indexOf(currentTheme) !== -1
+    curatedThemes = Model.curate(themes, preferences, false, showHidden)
+    curationMessage = ""
+    if (!preferencesProc.running) {
+      preferencesReady = false
+      preferencesProc.nextUndo = undoHide
+      preferencesProc.successMessage = ""
+      preferencesProc.command = ["python3", scriptPath("preferences.py"), "read"]
+      preferencesProc.running = true
+    }
     opened = true
     // Land on the current theme from the previous open's index before asking
     // for a fresh one. selectedIndex survives close(), and indexProc is async,
@@ -230,6 +261,7 @@ Item {
   }
 
   function close() {
+    resetCollectionTransition()
     if (!applying && livePreview) revertPreview()
     if (pickDir && !applying) finishPick("")
     cancelExit()
@@ -252,6 +284,128 @@ Item {
   }
 
   Process {
+    id: preferencesProc
+    property var nextUndo: null
+    property string successMessage: ""
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        if (!text) return
+        try {
+          root.preferences = JSON.parse(text)
+          root.preferencesReady = true
+          var landed = root.settleOpeningFavorites()
+          root.curatedThemes = Model.curate(root.themes, root.preferences, false, root.showHidden)
+          root.undoHide = preferencesProc.nextUndo
+          root.curationMessage = preferencesProc.successMessage
+          root.scrubQuick = true
+          if (preferencesProc.command[2] === "favorite" && root.favoritesOnly && !root.filterText) root.transitionCollection()
+          else root.rebuild(landed)
+        } catch (e) { root.curationMessage = "Could not read saved choices" }
+      }
+    }
+    onExited: function(exitCode, exitStatus) {
+      if (exitCode !== 0) root.curationMessage = "Could not save or read choices; preferences left unchanged"
+    }
+  }
+
+  function saveChoice(action, name, value, background, undo, message) {
+    if (!preferencesReady || preferencesProc.running) return
+    var args = ["python3", scriptPath("preferences.py"), action, name, value ? "true" : "false"]
+    if (action === "hidden") args.push(background)
+    preferencesProc.nextUndo = undo
+    preferencesProc.successMessage = message
+    preferencesProc.command = args
+    preferencesProc.running = true
+  }
+
+  function toggleFavorite() {
+    if (!selected) return
+    saveChoice("favorite", selected.name, !selected.favorite, "", undoHide, "")
+  }
+
+  function toggleBackgroundHidden() {
+    if (!selected || !selected.backgrounds.length) return
+    var hidden = backgroundHidden
+    var original = Model.findByName(themes, selected.name)
+    var visibleCount = original.backgrounds.filter(function(path) {
+      return !Model.isHidden(root.preferences, original.name, path)
+    }).length
+    if (!hidden && visibleCount <= 1) {
+      curationMessage = "Keep one background visible for this theme"
+      return
+    }
+    var key = Model.backgroundId(selectedBackground)
+    saveChoice("hidden", selected.name, !hidden, key,
+               hidden ? null : {name: selected.name, key: key},
+               "")
+  }
+
+  function restoreLastHidden() {
+    if (undoHide) saveChoice("hidden", undoHide.name, false, undoHide.key, null, "")
+  }
+
+  function curationStatus() { return JSON.stringify({available: true, ready: preferencesReady, favorites: preferences.favorites.length}) }
+
+  function recurate() {
+    curatedThemes = Model.curate(themes, preferences, false, showHidden)
+    transitionCollection()
+  }
+
+  function resetCollectionTransition() {
+    collectionOut.stop()
+    collectionIn.stop()
+    collectionOpacity = 1
+    collectionOffset = 0
+  }
+
+  function transitionCollection() {
+    scrubQuick = true
+    if (!opened || applying) { rebuild(false); return }
+    collectionIn.stop()
+    collectionOut.restart()
+  }
+
+  // The model is replaced only while the cards are invisible. Keep the gate
+  // stationary and let the existing wallpaper transition handle a new theme.
+  SequentialAnimation {
+    id: collectionOut
+    NumberAnimation { target: root; property: "collectionOpacity"; to: 0; duration: 90; easing.type: Easing.InQuad }
+    ScriptAction {
+      script: {
+        root.rebuild(false, true)
+        root.collectionOffset = root.sp(6)
+        // rebuild queues centering first; reveal only after that settles.
+        Qt.callLater(function() {
+          if (root.opened && !root.applying && !collectionOut.running && root.collectionOpacity === 0)
+            collectionIn.restart()
+        })
+      }
+    }
+  }
+  ParallelAnimation {
+    id: collectionIn
+    NumberAnimation { target: root; property: "collectionOpacity"; to: 1; duration: 190; easing.type: Easing.OutCubic }
+    NumberAnimation { target: root; property: "collectionOffset"; to: 0; duration: 190; easing.type: Easing.OutCubic }
+  }
+
+  function settleOpeningFavorites() {
+    if (openingFavoritesSettled || !openingIndexReady || !preferencesReady) return false
+    openingFavoritesSettled = true
+    favoritesOnly = preferences.favorites.indexOf(currentTheme) !== -1
+    return true
+  }
+
+  function toggleFavoritesOnly() {
+    if (searching) return
+    // A deliberate toggle wins over a late index/preferences response.
+    openingFavoritesSettled = true
+    favoritesOnly = !favoritesOnly
+    recurate()
+  }
+  function toggleShowHidden() { showHidden = !showHidden; recurate() }
+
+  Process {
     id: thumbsProc
     command: [root.scriptPath("thumbs.sh")]
     onExited: root.cacheGen += 1
@@ -271,25 +425,32 @@ Item {
     currentTheme = parsed.currentTheme || ""
     currentBackground = parsed.currentBackground || ""
     if (changed) themes = parsed.themes || []
+    openingIndexReady = true
+    settleOpeningFavorites()
+    curatedThemes = Model.curate(themes, preferences, false, showHidden)
     rebuild(true)
     if (!thumbsProc.running) thumbsProc.running = true
   }
 
   // Re-derive rows and, on first load per open, land on the current theme and
   // its current background so the first frame is the desktop you already have.
-  function rebuild(landOnCurrent) {
+  function rebuild(landOnCurrent, transitioning) {
+    if (!transitioning) resetCollectionTransition()
     var keep = selected ? selected.name : ""
-    rows = Model.filter(themes, filterText, modeFilter)
+    var keepBackground = selectedBackground
+    rows = Model.browse(curatedThemes, filterText, "all", favoritesOnly)
     var target = landOnCurrent && currentTheme ? currentTheme : keep
     var i = Model.indexOf(rows, target)
     if (i === -1) i = rows.length ? 0 : -1
     selectedIndex = i
     if (landOnCurrent) {
-      var t = selected
+      var t = rows[i]
       var bi = Model.backgroundIndexOf(t, currentBackground)
       bgIndex = bi === -1 ? 0 : bi
-    } else if (keep !== (selected ? selected.name : "")) {
-      bgIndex = 0
+    } else {
+      var nextTheme = rows[i]
+      var nextBackground = nextTheme && keep === nextTheme.name ? Model.backgroundIndexOf(nextTheme, keepBackground) : -1
+      bgIndex = nextBackground === -1 ? 0 : nextBackground
     }
     Qt.callLater(function() { if (selectedIndex >= 0) strip.positionViewAtIndex(selectedIndex, ListView.Center) })
   }
@@ -358,8 +519,17 @@ Item {
   // resolves back to a still desktop that has no video in it.
   onApplyingChanged: if (applying) { videoArmed = false; videoArm.stop() }
 
+  function beginSearch() {
+    searching = true
+    keys.forceActiveFocus()
+  }
+
+  function endSearch() {
+    searching = false
+    setFilter("")
+  }
+
   function setFilter(text) { scrubQuick = true; filterText = text; rebuild(false) }
-  function cycleMode() { scrubQuick = true; modeFilter = Model.nextMode(modeFilter); rebuild(false) }
 
   // Single steps wrap around the ends; page jumps and Home/End clamp.
   function move(delta, wrap) {
@@ -501,6 +671,7 @@ Item {
   function apply() {
     var t = selected
     if (!t || applying) return
+    resetCollectionTransition()
     applying = true
     chromeOpacity = 0
     if (pickDir) { finishPick(t.name); dismiss(); return }
@@ -884,9 +1055,18 @@ Item {
           event.accepted = true
           if (root.applying) return          // committed; the exit is running
           var k = event.key
-          if (k === Qt.Key_Escape) { if (root.filterText) root.setFilter(""); else root.dismiss() }
+          if (event.modifiers === Qt.ControlModifier && k === Qt.Key_F) root.toggleFavoritesOnly()
+          else if (!root.searching && event.modifiers === Qt.NoModifier && k === Qt.Key_F) root.toggleFavorite()
+          else if ((event.modifiers & Qt.ControlModifier) && k === Qt.Key_H) root.toggleShowHidden()
+          else if ((event.modifiers & Qt.ControlModifier) && k === Qt.Key_Z) root.restoreLastHidden()
+          else if (k === Qt.Key_Delete && !root.searching) root.toggleBackgroundHidden()
+          else if (k === Qt.Key_Escape) { if (root.searching) root.endSearch(); else root.dismiss() }
+          else if (!root.searching && event.modifiers === Qt.NoModifier && (k === Qt.Key_Space || k === Qt.Key_Slash)) root.beginSearch()
+          else if (!root.searching && event.modifiers === Qt.NoModifier && k === Qt.Key_H) root.move(-1, true)
+          else if (!root.searching && event.modifiers === Qt.NoModifier && k === Qt.Key_L) root.move(1, true)
+          else if (!root.searching && event.modifiers === Qt.NoModifier && k === Qt.Key_K) root.moveBackground(-1)
+          else if (!root.searching && event.modifiers === Qt.NoModifier && k === Qt.Key_J) root.moveBackground(1)
           else if (k === Qt.Key_Return || k === Qt.Key_Enter) root.apply()
-          else if (k === Qt.Key_Tab || k === Qt.Key_Backtab) root.cycleMode()
           else if (k === Qt.Key_Left) root.move(-1, true)
           else if (k === Qt.Key_Right) root.move(1, true)
           else if (k === Qt.Key_Up) root.moveBackground(-1)
@@ -895,8 +1075,8 @@ Item {
           else if (k === Qt.Key_PageDown) root.move(5, false)
           else if (k === Qt.Key_Home) root.jumpTo(0)
           else if (k === Qt.Key_End) root.jumpTo(root.rows.length - 1)
-          else if (Util.editsFilter(event, root.filterText)) root.setFilter(Util.editedFilter(event, root.filterText))
-          else if (event.text && event.text.length === 1 && event.text.charCodeAt(0) >= 32 && event.text.charCodeAt(0) !== 127
+          else if (root.searching && Util.editsFilter(event, root.filterText)) root.setFilter(Util.editedFilter(event, root.filterText))
+          else if (root.searching && event.text && event.text.length === 1 && event.text.charCodeAt(0) >= 32 && event.text.charCodeAt(0) !== 127
                    && (event.modifiers === Qt.NoModifier || event.modifiers === Qt.ShiftModifier))
             root.setFilter(root.filterText + event.text)
           else event.accepted = false
@@ -911,25 +1091,31 @@ Item {
         spacing: root.sp(12)
         visible: !!root.selected
 
-        Text {
-          text: root.selected ? root.selected.name : ""
-          textFormat: Text.PlainText
-          color: root.selected && root.selected.mode === "light" ? root.fg : "#ffffff"
-          font.family: Style.fontFamily
-          font.pixelSize: Math.round(root.sp(44) * Math.sqrt(root.k))
-          font.weight: Font.Bold
-          font.letterSpacing: -1
-          style: Text.Raised
-          styleColor: Util.alpha(root.bg, 0.6)
-        }
         Row {
           spacing: root.sp(10)
-          Text { text: root.selected ? (root.selected.mode === "light" ? "light" : "dark") : ""; color: root.fg; font.family: Style.fontFamily; font.pixelSize: root.metaPx }
-          Text { text: "·"; color: root.fg; opacity: 0.45; font.family: Style.fontFamily; font.pixelSize: root.metaPx }
-          Text { text: root.selected ? (root.selected.source === "user" ? "installed" : "stock") + (root.selected.shadowsStock ? " (shadows stock)" : "") : ""; color: root.fg; font.family: Style.fontFamily; font.pixelSize: root.metaPx }
-          Text { text: "·"; color: root.fg; opacity: 0.45; font.family: Style.fontFamily; font.pixelSize: root.metaPx }
-          Text { text: root.selected ? root.selected.backgrounds.length + " background" + (root.selected.backgrounds.length === 1 ? "" : "s") : ""; color: root.fg; font.family: Style.fontFamily; font.pixelSize: root.metaPx }
-          Text { visible: root.selected && root.selected.name === root.currentTheme; text: "· current"; color: root.fg; opacity: 0.7; font.family: Style.fontFamily; font.pixelSize: root.metaPx }
+          Text {
+            id: titleName
+            text: root.selected ? root.selected.name : ""
+            textFormat: Text.PlainText
+            color: root.selected && root.selected.mode === "light" ? root.fg : "#ffffff"
+            font.family: Style.fontFamily
+            font.pixelSize: Math.round(root.sp(44) * Math.sqrt(root.k))
+            font.weight: Font.Bold
+            font.letterSpacing: -1
+            style: Text.Raised
+            styleColor: Util.alpha(root.bg, 0.6)
+          }
+          Text {
+            text: "★"
+            anchors.verticalCenter: parent.verticalCenter
+            color: titleName.color
+            font.family: Style.fontFamily
+            font.pixelSize: root.sp(28)
+            opacity: root.selected && root.selected.favorite ? 1 : 0
+            scale: opacity > 0 ? 1 : 0.65
+            Behavior on opacity { NumberAnimation { duration: 150 } }
+            Behavior on scale { NumberAnimation { duration: 200; easing.type: Easing.OutCubic } }
+          }
         }
         Row {
           Repeater {
@@ -942,7 +1128,7 @@ Item {
         // the border does the marking. Only when there is something to choose.
         Item {
           id: bgArea
-          visible: !!(root.selected && root.selected.backgrounds.length > 1)
+          visible: !!root.selected && (root.selected.backgrounds.length > 1 || root.selectedHiddenCount > 0)
           width: root.bgThumbW + root.sp(120)
           height: root.bgStripH
           readonly property real selectedCenter: root.bgThumbH / 2
@@ -955,9 +1141,30 @@ Item {
           ListView {
             id: bgStrip
             width: root.bgThumbW
-            height: parent.height
+            height: root.bgStripH
             orientation: ListView.Vertical
             model: root.selected ? root.selected.backgrounds : []
+            // A quiet end marker, part of the scrollable content. It is not
+            // a selectable wallpaper or a control; Ctrl+H reveals hidden items.
+            footer: Item {
+              width: bgStrip.width
+              height: root.hiddenFooterHeight
+              visible: height > 0
+              Accessible.role: Accessible.StaticText
+              Accessible.name: root.selectedHiddenCount + " hidden backgrounds"
+              Row {
+                anchors.centerIn: parent
+                spacing: root.sp(6)
+                opacity: 0.4
+                HiddenEye { width: root.sp(14); height: root.sp(14); anchors.verticalCenter: parent.verticalCenter }
+                Text {
+                  text: root.selectedHiddenCount + " hidden · Ctrl+H to show"
+                  color: root.fg
+                  font.family: Style.fontFamily
+                  font.pixelSize: root.fz.caption
+                }
+              }
+            }
             spacing: root.sp(8)
             clip: true
             currentIndex: root.bgIndex
@@ -980,6 +1187,7 @@ Item {
               required property int index
               required property var modelData
               readonly property bool sel: index === root.bgIndex
+              readonly property bool hidden: !!root.selected && Model.isHidden(root.preferences, root.selected.name, modelData)
               z: sel ? 1 : 0
               readonly property string key: root.selected && root.selected.bgKeys ? (root.selected.bgKeys[index] || "") : ""
               width: root.bgThumbW
@@ -987,7 +1195,7 @@ Item {
 
               Item {
                 anchors.fill: parent
-                opacity: bgCell.sel ? 1 : 0.72
+                opacity: bgCell.sel ? 1 : bgCell.hidden ? 0.3 : 0.72
                 // The selected card fills the reserved frame; neighbors sit
                 // back so enlargement cannot clip at the first or last row.
                 transformOrigin: Item.Center
@@ -1035,6 +1243,16 @@ Item {
                     PathLine { x: bgArea.skew; y: 0 }
                   }
                 }
+              }
+              Rectangle {
+                anchors { right: parent.right; bottom: parent.bottom; margins: root.sp(8) }
+                visible: bgCell.hidden
+                width: root.sp(28)
+                height: root.sp(28)
+                radius: root.sp(4)
+                color: Util.alpha(root.bg, 0.92)
+                HiddenEye { anchors.centerIn: parent }
+
               }
               MouseArea {
                 anchors.fill: parent
@@ -1322,82 +1540,71 @@ Item {
       }
       }
 
-      // ---- name search and category filters
-      Column {
-        width: Math.max(categoryChips.implicitWidth, root.sp(320))
+      component HiddenEye: Item {
+        id: hiddenEye
+        property color ink: root.fg
+        width: root.sp(18)
+        height: root.sp(18)
+        Shape {
+          width: 24
+          height: 24
+          transform: Scale { xScale: hiddenEye.width / 24; yScale: hiddenEye.height / 24 }
+          preferredRendererType: Shape.CurveRenderer
+          ShapePath {
+            strokeColor: hiddenEye.ink
+            strokeWidth: 1.8
+            fillColor: "transparent"
+            capStyle: ShapePath.RoundCap
+            joinStyle: ShapePath.RoundJoin
+            PathSvg { path: "M 2 12 C 6 3 18 3 22 12 C 18 21 6 21 2 12 Z M 15 12 A 3 3 0 1 1 9 12 A 3 3 0 1 1 15 12 M 3 3 L 21 21" }
+          }
+        }
+      }
+
+      // Scope lives inside the search field; theme stars only mark favorites.
+      Rectangle {
+        id: searchField
+        width: root.sp(340)
+        height: root.sp(36)
         opacity: root.chromeOpacity
         anchors { horizontalCenter: parent.horizontalCenter; top: parent.top; topMargin: root.sp(52) }
-        spacing: root.sp(10)
-
-        // The global key handler already owns typing. This visible search
-        // surface explains that behavior without requiring a focus shortcut.
-        Rectangle {
-          width: parent.width
-          height: root.sp(36)
-          color: Util.alpha(root.bg, 0.86)
-          border.width: 1
-          border.color: root.filterText ? root.accent : Util.alpha(root.fg, 0.4)
-          Text {
-            anchors { left: parent.left; right: clearHint.left; verticalCenter: parent.verticalCenter; leftMargin: root.sp(12); rightMargin: root.sp(10) }
-            text: root.filterText ? root.filterText + "▍" : "Type to search themes…"
-            textFormat: Text.PlainText
-            elide: Text.ElideLeft
-            color: root.fg
-            opacity: root.filterText ? 1 : 0.72
-            font.family: Style.fontFamily
-            font.pixelSize: root.fz.body
-          }
-          Text {
-            id: clearHint
-            anchors { right: parent.right; verticalCenter: parent.verticalCenter; rightMargin: root.sp(12) }
-            text: root.filterText ? "Esc clear" : ""
-            color: root.fg
-            opacity: 0.6
-            font.family: Style.fontFamily
-            font.pixelSize: root.fz.caption
-          }
-          MouseArea { anchors.fill: parent; onClicked: keys.forceActiveFocus() }
-        }
-
-        Row {
-          id: categoryChips
-          anchors.horizontalCenter: parent.horizontalCenter
-          spacing: root.sp(6)
-          Repeater {
-            model: Model.MODES
-            Rectangle {
-              id: chip
-              required property string modelData
-              readonly property bool on: modelData === root.modeFilter
-              height: root.sp(24)
-              width: chipLabel.implicitWidth + root.sp(20)
-              color: on ? Util.alpha(root.fg, 0.92) : Util.alpha(root.bg, 0.55)
-              border.width: 1
-              border.color: on ? root.fg : Util.alpha(root.fg, 0.35)
-              Text {
-                id: chipLabel
-                anchors.centerIn: parent
-                text: chip.modelData.charAt(0).toUpperCase() + chip.modelData.slice(1)
-                color: chip.on ? root.bg : root.fg
-                font.family: Style.fontFamily
-                font.pixelSize: root.fz.caption
-                font.weight: chip.on ? Font.DemiBold : Font.Normal
-              }
-              MouseArea { anchors.fill: parent; onClicked: { root.modeFilter = chip.modelData; root.rebuild(false) } }
-            }
-          }
-        }
-
+        radius: root.sp(3)
+        color: Util.alpha(root.bg, root.searching ? 0.86 : 0.55)
+        border.width: 1
+        border.color: root.searching ? Util.alpha(root.accent, 0.8) : Util.alpha(root.fg, 0.16)
         Text {
-          anchors.horizontalCenter: parent.horizontalCenter
-          text: "Tab to cycle categories"
+          anchors { left: parent.left; right: searchHint.left; verticalCenter: parent.verticalCenter; leftMargin: root.sp(12); rightMargin: root.sp(12) }
+          text: root.searching ? root.filterText + "▍" : "Search themes"
+          textFormat: Text.PlainText
+          elide: Text.ElideLeft
           color: root.fg
+          opacity: root.searching ? 1 : 0.55
+          font.family: Style.fontFamily
+          font.pixelSize: root.fz.body
+        }
+        Text {
+          id: searchHint
+          anchors { right: parent.right; verticalCenter: parent.verticalCenter; rightMargin: root.sp(12) }
+          text: root.searching ? (root.filterText ? "All themes · Esc" : "Esc") : root.favoritesOnly ? "Favorites · Ctrl+F" : "/"
+          color: root.fg
+          opacity: 0.45
           font.family: Style.fontFamily
           font.pixelSize: root.fz.caption
-          opacity: 0.7
-          style: Text.Outline
-          styleColor: Util.alpha(root.bg, 0.7)
         }
+        MouseArea { anchors.fill: parent; onClicked: root.beginSearch() }
+      }
+
+      // Errors and constraints surface briefly; ordinary curation is visual.
+      Text {
+        anchors { horizontalCenter: parent.horizontalCenter; bottom: stripArea.top; bottomMargin: root.sp(12) }
+        text: root.curationMessage
+        visible: text.length > 0
+        opacity: root.chromeOpacity
+        color: root.fg
+        font.family: Style.fontFamily
+        font.pixelSize: root.fz.caption
+        style: Text.Outline
+        styleColor: root.bg
       }
 
       // ---- empty state: the filter ate everything
@@ -1409,7 +1616,7 @@ Item {
 
         Text {
           anchors.horizontalCenter: parent.horizontalCenter
-          text: root.filterText ? "No themes match “" + root.filterText + "”" : "No " + root.modeFilter + " themes"
+          text: root.filterText ? "No themes match “" + root.filterText + "”" : root.favoritesOnly ? "No favorite themes yet" : "No themes available"
           textFormat: Text.PlainText
           color: root.fg
           font.family: Style.fontFamily
@@ -1420,7 +1627,7 @@ Item {
         }
         Text {
           anchors.horizontalCenter: parent.horizontalCenter
-          text: root.filterText ? "Esc clears the filter" : "Tab cycles the filter"
+          text: root.filterText ? "Esc clears search and returns to navigation" : root.favoritesOnly ? "Turn off Favorites to browse and star a theme" : "Install a theme to get started"
           color: root.fg
           opacity: 0.75
           font.family: Style.fontFamily
@@ -1503,6 +1710,8 @@ Item {
         ListView {
           id: strip
           anchors.fill: parent
+          opacity: root.collectionOpacity
+          transform: Translate { y: root.collectionOffset }
           orientation: ListView.Horizontal
           model: root.rows
           spacing: root.sp(4)
@@ -1619,7 +1828,7 @@ Item {
                   }
                   Text {
                     anchors { left: parent.left; bottom: parent.bottom; leftMargin: root.sp(8); bottomMargin: root.sp(9) }
-                    text: cell.modelData.name
+                    text: (cell.modelData.favorite ? "★ " : "") + cell.modelData.name
                     textFormat: Text.PlainText
                     color: cell.modelData.colors.foreground || "#fff"
                     font.family: Style.fontFamily
@@ -1751,7 +1960,7 @@ Item {
         anchors { right: parent.right; bottom: parent.bottom; rightMargin: root.sp(56); bottomMargin: root.sp(14) }
         spacing: root.sp(18)
         Repeater {
-          model: ["← → theme", "↑ ↓ background", "type to search", "Tab category", "⏎ apply", "Esc cancel"]
+          model: ["h/l theme", "j/k background", "/ search", "Ctrl+F favorites", "⏎ apply", "Esc cancel"]
           Text { required property string modelData; text: modelData; color: root.fg; opacity: 0.75; font.family: Style.fontFamily; font.pixelSize: root.fz.caption }
         }
       }
@@ -1780,7 +1989,12 @@ Item {
     selected ? selected.backgrounds.length : 1,
     Math.floor((stripArea.y - root.sp(24) - (titleBlock.y + bgArea.y) + root.sp(8))
       / (bgThumbH + root.sp(8)))))
-  readonly property int bgStripH: bgThumbH * bgVisibleCount + root.sp(8) * (bgVisibleCount - 1)
+  // Short collections need enough viewport for their end marker. Longer
+  // collections reveal it naturally as the final wallpaper reaches the top.
+  readonly property int bgStripH: Math.min(
+    bgThumbH * bgVisibleCount + root.sp(8) * (bgVisibleCount - 1)
+      + (selected && selected.backgrounds.length <= bgVisibleCount ? hiddenFooterHeight : 0),
+    Math.max(bgThumbH, stripArea.y - root.sp(24) - (titleBlock.y + bgArea.y)))
 
   // Keep the index warm so the first open doesn't wait on a cold walk.
   Component.onCompleted: { freezeMetrics(); indexProc.running = true }
