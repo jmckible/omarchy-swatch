@@ -127,8 +127,14 @@ function backgroundIndexOf(theme, path) {
   if (!path || bgs.length === 0) return -1
   var exact = bgs.indexOf(path)
   if (exact !== -1) return exact
+  // Stock background controls can put the animated alternative on the desktop.
+  // Restore its paired still selection so applying it returns to a static image.
+  var videos = theme.bgVideos || []
+  exact = videos.indexOf(path)
+  if (exact !== -1 && exact < bgs.length) return exact
   var base = baseName(path)
   for (var i = 0; i < bgs.length; i++) if (baseName(bgs[i]) === base) return i
+  for (var j = 0; j < bgs.length; j++) if (videos[j] && baseName(videos[j]) === base) return j
   return -1
 }
 

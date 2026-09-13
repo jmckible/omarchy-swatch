@@ -85,6 +85,15 @@ const V = { name: "gruvbox", label: "Gruvbox", mode: "dark", source: "stock",
   bgVideos: ["", "/b/2.mp4", ""],
   bgVideoKeys: ["", "2222222222222222", ""] }
 
+// A desktop video restores the same slot, whose apply target remains the still.
+for (const path of ["/b/2.mp4", "/state/current/theme/backgrounds/2.mp4"]) {
+  const index = Model.backgroundIndexOf(V, path)
+  assert.equal(index, 1)
+  assert.equal(Model.backgroundAt(V, index), "/b/2.jpg")
+}
+assert.equal(Model.backgroundIndexOf(V, "/b/unpaired.mp4"), -1)
+assert.equal(Model.backgroundIndexOf(V, ""), -1)
+
 assert.equal(Model.videoKeyAt(V, 1), "2222222222222222")
 assert.equal(Model.videoKeyAt(V, 0), "")
 assert.equal(Model.videoKeyAt(V, 2), "")
