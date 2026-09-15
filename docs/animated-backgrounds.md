@@ -55,10 +55,19 @@ picker draws while scrubbing, which Swatch already owns outright.
 
 CLAUDE.md used to gate this work on "after Omarchy 4.1 defines how the shell
 plays them". That was a gate on the *intro* framing and does not bind this
-model; what remains blocking is `qt6-multimedia` below, which is ours to
-resolve rather than the shell's.
+model; nothing blocks it now, `qt6-multimedia` below having been settled
+upstream.
 
-## qt6-multimedia is optional, by construction
+The bet held. Omarchy has since defined shell playback both ways — looping video
+wallpapers (#6792, merged) and per-boot intros (#9639, open) — and neither
+touches this surface. Upstream's intro is keyed per background and paired by
+stem, the same two choices made here, which is reassuring rather than
+competitive: it plays once when you boot, this plays whenever you scrub. The two
+can hold the same file and mean different things by it. What upstream's framing
+does buy it is a cross-fade at the end, and that is the one place its clips and
+ours diverge — see Direction below.
+
+## qt6-multimedia is optional, and the isolation stays
 
 `MediaPlayer` lives in `qt6-multimedia`. Quickshell does **not** pull it:
 
@@ -66,10 +75,18 @@ resolve rather than the shell's.
 quickshell → qt6-base, qt6-declarative, qt6-svg, qt6-wayland
 ```
 
-Nor does `omarchy` declare it. Where it is present it arrived via something
-unrelated (mpv, kdenlive), so it cannot be assumed — and `import QtMultimedia`
-is a hard error at component load, which would take the whole overlay down on a
-machine without it.
+Omarchy did not declare it either when this was written, which was the whole
+argument for isolating the import. **That changed**: native video wallpaper
+support (upstream #6792, merged 2026-09-06) added `qt6-multimedia` and
+`qt6-multimedia-ffmpeg` to `omarchy-base.packages` and back-filled existing
+installs through migration `1786609204.sh`. On a current Omarchy the module is
+guaranteed, and the shell's own `qs.Ui.BackgroundVideo` depends on it.
+
+The isolation is still not optional, for two reasons that outlive the
+dependency: an install that predates that migration still lacks the module, and
+Swatch is a Quickshell plugin that nothing stops from being mounted outside
+Omarchy. `import QtMultimedia` is a hard error at component load, so either case
+would take the whole overlay down rather than degrade.
 
 Hence `VideoStage.qml`. It is the only file that imports QtMultimedia, and
 `Swatch.qml` reaches it through a `Loader`. A missing module lands that Loader
@@ -133,16 +150,28 @@ changes.
 ## Direction: which end holds the still
 
 A clip meets its still at exactly one end, and which end is a property of the
-footage, not a convention we pick. Measured against yamz8's eleven:
+footage, not a convention we pick. Across the 77 clips now installed every one
+lands under 8, and the set is overwhelmingly ARRIVE — 73 of 77, from
+`last-horizon/omarchy` at 0.00 to `retro-82/1-in-the-groove` at 5.84. The four
+exceptions are worth knowing by name:
 
 - **DEPART** — the still is frame 0; the clip moves away from it.
-  `gruvbox/3-village-square` (2.70), `solitude/BG1` (3.40),
-  `gruvbox/1-the-backwater` (3.73), `nord/1-city-view` (7.26).
-- **ARRIVE** — the still is the final frame; the clip lands on it.
-  `last-horizon/omarchy` (0.00), `solitude/BG4` (1.80),
-  `solitude/BG2` (2.76), `solitude/BG5` (3.78),
-  `tokyo-night/5-oma-cityscape` (3.76), `retro-82/2-dusk-guardian` (5.03),
-  `tokyo-night/3-sunset-lake` (5.45).
+  `osaka-jade/2-shaded-entrance` (1.62), `ristretto/2-coffee-beans` (2.33),
+  `solitude/BG1` (3.25), `nord/1-city-view` (6.76).
+
+Scores are mean absolute difference of 64×36 greyscale signatures; a true match
+is under about 8, and the other end of the same clip scores 16–55.
+
+**Crop the still to the clip's aspect before comparing, or the measurement
+lies.** Stills run from 1.34 (`gruvbox/3-village-square`) to 3.03
+(`retro-82/5-zen-boat`) while every clip is 16:9. Scaling both to 64×36 without
+cropping squashes them by different factors, the content stops lining up, and the
+score becomes noise: measured that way `solitude/BG1` read 34.81/47.09 — no match
+at either end — and `3-village-square` read 18.02, when both in fact match at
+3.25 and 2.51. Centre-crop the still to 16:9 first, which is what
+`PreserveAspectCrop` does to it on screen anyway, and the numbers reproduce the
+values filed here. Both times this bit, it inverted a direction rather than
+merely blurring it.
 
 Measure **both ends against every wallpaper the theme ships**, not the end
 against a bundled still. `solitude/90-storm` was filed as ARRIVE onto a still
@@ -152,10 +181,14 @@ solitude already had, and the extra background was never needed. Only
 `last-horizon/omarchy` genuinely lands somewhere no theme ships — its best
 shipped match is 16.57, comfortably outside the threshold.
 
-Scores are mean absolute difference of 64×36 signatures; a true match is under
-about 8, and the other end of the same clip scores 16–55. Detect it by comparing
-both ends to the still rather than assuming — assuming the last frame is what
-produced a wrong reading of `3-village-square` once already.
+**An upstream clip is not guaranteed to have a seam at all.** Omarchy's boot
+intros cross-fade into the still over their final 750 ms, so they are authored
+without needing either end to be pixel-exact, and `solitude/1-on-pole` is one
+that isn't: 45.61 first, 33.19 last, against a still its own theme ships. Swatch
+has no cross-fade to hide that with by design (below), so measure an upstream
+clip before adopting it rather than trusting that it was paired carefully — 74 of
+the 75 offered do land, which is exactly what makes the one that doesn't easy to
+miss.
 
 This is the whole transition question. The seam is at the *opposite* end from
 the still: a DEPART clip starts pixel-identical to what is already on screen and
@@ -208,22 +241,43 @@ starting a decode on each would thrash for nothing anyone could see. `Timer`
 `videoDwell` (420 ms) arms it, every move disarms it, and `applying` kills it —
 a clip still running under the exit defocus would be motion inside the blur.
 
-It plays once and holds on its final frame rather than looping. Seven of the
-eleven clips are ARRIVE, so their final frame *is* the still: holding there is
-already the right resting state, and the hand-off back is a no-op. A loop would
-jump-cut exactly those four every time it wrapped.
+It plays once and holds on its final frame rather than looping. 73 of the 77
+clips are ARRIVE, so their final frame *is* the still: holding there is already
+the right resting state, and the hand-off back is a no-op. A loop would jump-cut
+the rest every time it wrapped.
 
-Still open: whether DEPART clips should loop instead, since they end away from
-their still and so have nowhere natural to rest.
+The looping question is now narrow rather than open. 26 of the 77 match the
+still at **both** ends, which makes them loop-safe for free — 19 of the 20
+wordmarks, generated to return to where they started (`hackerman` is the one
+that misses, at 9.40), plus seven filmed clips
+(`osaka-jade/2-shaded-entrance`, `retro-82/7-the-journey`,
+`lupine/04-elegant-blue-wave`, `matte-black/2-dot-hands`, `vantablack/0-dot-hands`,
+`catppuccin/3-blue-eye`, `last-horizon/2-blink`). Only three clips genuinely have
+nowhere to rest: `ristretto/2-coffee-beans`, `solitude/BG1` and
+`nord/1-city-view` — DEPART clips whose last frame matches nothing. Any looping
+decision is about those three, and a per-clip both-ends test decides it, so it
+does not need a policy.
 
 ## Getting clips
 
 No footage ships in this repo, and none will. The clips in the README and the
 demo are [@yamzeight](https://x.com/yamzeight)'s work; crediting him is not the
-same as being licensed to redistribute him, so they stay where he published
-them and you fetch your own copy. If you use his footage anywhere public,
-credit him there too — it is the whole reason the feature has anything to
-demonstrate.
+same as being licensed to redistribute him, so you fetch your own copy. If you
+use his footage anywhere public, credit him there too — it is the whole reason
+the feature has anything to demonstrate.
+
+**Upstream is now the place to fetch it from.** yamz8 has contributed 55
+photographic intros (#9639) and 20 generated wordmark intros (#11906) to Omarchy
+under its MIT license, as `themes/<theme>/intros/<background stem>.mp4` — the
+same stem pairing this document describes, arrived at independently. Both were
+still open drafts against `quattro` when this was written, so they are fetched
+from the PR head rather than found on disk; if they merge, every Omarchy install
+has a stem-matched clip for most stock backgrounds and the picker can animate
+with no setup at all. That is a far better default than a scrape: these are the
+authored edits at full length, where a scrape is typically truncated. It is not
+uniformly higher quality, though — the packaged set is compressed to fit in the
+repo, so a 1080p scrape can carry five times the bitrate of its 720p counterpart.
+Measure both and keep the better file per clip.
 
 The plugin has no opinion about where a clip came from. Any video you hold the
 rights to becomes an animated background the moment it is named after a still

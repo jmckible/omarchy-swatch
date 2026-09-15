@@ -116,8 +116,9 @@ Item {
   // only while applying) so the picker doesn't fade in over itself.
   property real chromeOpacity: 1
   Behavior on chromeOpacity { enabled: root.applying; NumberAnimation { duration: 180; easing.type: Easing.OutQuad } }
-  readonly property bool videoMoving: videoLoader.status === Loader.Ready
-    && videoLoader.item && videoLoader.item.motionPlaying
+  // Written by syncVideoMoving, which the slots call when their own motion
+  // changes — a root binding cannot reach into a Repeater delegate.
+  property bool videoMoving: false
   property bool previewsQuiet: false
   onVideoMovingChanged: {
     previewsQuiet = false
@@ -135,27 +136,58 @@ Item {
   readonly property string selectedBackground: Model.backgroundAt(selected, bgIndex)
   readonly property string selectedKey: Model.keyAt(selected, bgIndex)
 
-  // Animated backgrounds. The clip loads as soon as a background is selected,
-  // so playback can begin while the wipe that revealed it is still running —
-  // it is not a dwell you wait out. That matters most for an ARRIVE clip,
-  // whose still IS its final frame: wait, and you are shown the ending before
-  // the animation starts from the beginning.
+  // Animated backgrounds. Playback begins while the wipe that revealed the
+  // background is still running — it is not a dwell you wait out. That matters
+  // most for an ARRIVE clip, whose still IS its final frame: wait, and you are
+  // shown the ending before the animation starts from the beginning.
   //
-  // The delay is only a debounce, sized to outlast key auto-repeat (~40 ms) so
-  // a held arrow never loads anything, while a deliberate landing loads at
-  // once. It is far below wipeMs, so by the time the wipe finishes the clip is
-  // usually already moving.
+  // Clips are held open per background rather than opened on arrival — see
+  // videoSlots below, which is what lets the arm delay be skipped outright for a
+  // clip already in a slot. The delay remains for the clip that is not: a
+  // debounce sized to outlast key auto-repeat (~40 ms), far below wipeMs, so a
+  // held arrow opens nothing and a deliberate landing on a cold clip still has
+  // it moving by the time the wipe finishes.
   readonly property string selectedVideoKey: Model.videoKeyAt(selected, bgIndex)
   readonly property bool videoAvailable: selectedVideoKey !== "" && !applying && opened && viewReady
-  // Loading starts the moment a deliberate move lands, with no delay, so the
-  // ~115 ms it takes runs *underneath* the arming delay instead of after it.
-  // Suppressed mid-burst: a held arrow is scrubRapid the whole way, so nothing
-  // is opened for backgrounds you are only passing over. The arm timer clears
-  // that flag when movement stops — without which this stays false forever
-  // after the first fast scrub, since noteMove only ever sets it.
-  readonly property bool videoLoadable: videoAvailable && !scrubRapid
   property bool videoArmed: false
   readonly property int videoArmDelayMs: 120
+
+  // One player per clip: the selected background, its two neighbours on the
+  // background axis, and whichever clip is still fading out. This is what takes
+  // the still out from between two animations.
+  //
+  // The old single player had to re-open on every move, and although the ~115 ms
+  // open ran underneath the 120 ms arm delay rather than after it, the incoming
+  // clip could still only *begin* once both had elapsed — by which time the
+  // outgoing clip's 140 ms fade-out was over and the still underneath had the
+  // screen to itself for about 100 ms. Keeping a player per clip means the one
+  // you land on is already open, so arming can skip its debounce entirely
+  // (`disarmVideo`) and the incoming fade-in runs against the outgoing fade-out
+  // instead of after it.
+  //
+  // Keyed by video key, the way the wallpaper slots are keyed by image key, so a
+  // slot already holding a wanted clip keeps its loaded player rather than
+  // re-opening it. ±1 is the whole win: it covers a deliberate step either way,
+  // and anything faster is suppressed by scrubRapid rather than preloaded for.
+  readonly property int videoSlotCount: 4
+  property var videoSlots: ["", "", "", ""]
+  // The clip being handed away, kept slotted so it still has a frame to hold
+  // while it fades. Without it a theme jump evicts the outgoing player, and a
+  // torn-down VideoOutput is blank — a black hole exactly where the cross-fade
+  // is supposed to be seamless.
+  property string videoPrevKey: ""
+  // The live key as stageVideo last staged it, so it can tell a real hand-off
+  // from being called again about the same background.
+  property string videoLiveKey: ""
+  // A hand-off is in flight, so the outgoing clip keeps the screen opaque under
+  // the incoming one. Sized to outlast the longer of the wipe and the off-wipe
+  // fade, plus the worst case where the incoming clip was cold and had to open
+  // first; releasing early would put the still back exactly where it was.
+  property bool videoHandoff: false
+  // Neighbours open under the same burst suppression as the live clip: a held
+  // arrow preloads nothing, since every background it crosses would want a
+  // different pair.
+  readonly property bool videoSlotsLoadable: opened && viewReady && !applying && !scrubRapid
   readonly property var ansi: Model.ansi(selected)
   readonly property color bg: selected ? selected.colors.background || "#101315" : "#101315"
   readonly property color fg: selected ? selected.colors.foreground || "#cacccc" : "#cacccc"
@@ -229,6 +261,15 @@ Item {
     scrubArmed = false
     scrubQuick = false
     scrubRapid = false   // a stale burst flag would suppress the first clip load
+    // Nothing carries across opens: the slots are re-filled by the landing's own
+    // stageVideo, and a key left over from last time would hold a player open
+    // for a background this open may never reach.
+    videoSlots = ["", "", "", ""]
+    videoPrevKey = ""
+    videoLiveKey = ""
+    videoMoving = false
+    videoHandoff = false
+    videoHandoffHold.stop()
     viewReady = false
     landing = true       // the first wallpaper of this open is a cut, not a fade
     wipeRun.stop(); wiping = false; wipeFrom = ""
@@ -421,6 +462,32 @@ Item {
 
   function curationStatus() { return JSON.stringify({available: true, ready: preferencesReady, favorites: preferences.favorites.length, viewReady: viewReady}) }
 
+  // Side-effect-free, like curationStatus. Whether a clip plays inside the wipe
+  // or after it is not visible in any log, and the difference is one frame of
+  // arming state — so it has to be inspectable from outside while the picker is
+  // open, or the only way to check a change here is to trust your eyes.
+  function videoStatus() {
+    var out = []
+    for (var i = 0; i < videoSlotCount; i++) {
+      var l = videoStages.itemAt(i)
+      var key = videoSlots[i]
+      out.push({
+        key: key ? key.slice(0, 8) : "",
+        live: key !== "" && key === selectedVideoKey,
+        open: !!(l && l.status === Loader.Ready && l.item && l.item.active),
+        loaded: !!(l && l.status === Loader.Ready && l.item && l.item.loaded),
+        showing: !!(l && l.status === Loader.Ready && l.item && l.item.showing),
+        framed: !!(l && l.status === Loader.Ready && l.item && l.item.framed),
+        opacity: l ? Math.round(l.opacity * 100) / 100 : 0
+      })
+    }
+    return JSON.stringify({
+      armed: videoArmed, moving: videoMoving, rapid: scrubRapid,
+      wiping: wiping, handoff: videoHandoff, live: selectedVideoKey.slice(0, 8),
+      prev: videoPrevKey.slice(0, 8), slots: out
+    })
+  }
+
   function recurate() {
     curatedThemes = Model.curate(themes, preferences, false, showHidden)
     transitionCollection()
@@ -568,7 +635,13 @@ Item {
     previewQuietDelay.stop()
     videoArmed = false
     videoArm.stop()
-    if (selectedVideoKey !== "" && !applying && opened) videoArm.restart()
+    if (selectedVideoKey === "" || applying || !opened) return
+    // Already open in its own slot: arm on this frame, so the clip plays against
+    // the outgoing one rather than after it. The debounce below exists to absorb
+    // an open, and a preloaded clip is not paying for one — waiting out 120 ms
+    // here is what let the still through between two animations.
+    if (!scrubRapid && videoSlotReady(selectedVideoKey)) videoArmed = true
+    else videoArm.restart()
   }
 
   Timer {
@@ -578,18 +651,34 @@ Item {
       // This timer only fires once movement has stopped — every move restarts
       // it — so reaching here is the definition of the burst being over.
       // scrubRapid records that the *last* move was part of one, and nothing
-      // else ever clears it, so leaving it set would keep videoLoadable false
-      // for the rest of the session: clips would play on the background you
-      // opened onto and never on one you scrubbed to.
+      // else ever clears it, so leaving it set would keep videoSlotsLoadable
+      // false for the rest of the session: clips would play on the background
+      // you opened onto and never on one you scrubbed to.
       scrubRapid = false
       if (root.videoAvailable) root.videoArmed = true
+      // Clearing the burst flag is what lets the slots open at all, so the
+      // neighbours have to be restaged once movement has actually stopped —
+      // otherwise nothing preloads until the *next* move and every landing
+      // after a fast scrub pays for its own open.
+      stageVideo()
     }
   }
 
   // Every route to a different background ends here, not just the arrow keys:
   // filtering and the landing on open change the selection without going
   // through noteMove, and each of those should re-start the dwell too.
-  onSelectedVideoKeyChanged: disarmVideo()
+  // Slots are restaged before arming, so videoSlotReady sees the new key's slot
+  // and not the one it is replacing. stageVideo owns the hand-off bookkeeping.
+  onSelectedVideoKeyChanged: {
+    stageVideo()
+    disarmVideo()
+  }
+
+  // The neighbours depend on bgIndex, not only on the live key: stepping between
+  // two still-only backgrounds never changes selectedVideoKey, so without this
+  // the preloads would go stale and the next clip you reach would pay for its
+  // own open again.
+  onBgIndexChanged: if (opened) stageVideo()
 
   // Also arm when availability itself flips — reopening on the background you
   // left on does not change selectedVideoKey, so the key handler never runs and
@@ -600,7 +689,15 @@ Item {
   // The exit owns the screen from the moment Enter is pressed. A clip still
   // running under the defocus would be motion inside the blur, and the lift
   // resolves back to a still desktop that has no video in it.
-  onApplyingChanged: if (applying) { videoArmed = false; videoArm.stop() }
+  // The hold goes too: a clip pinned opaque over its successor would still be
+  // on screen when the defocus starts, which is the one thing this handler is
+  // here to prevent.
+  onApplyingChanged: if (applying) {
+    videoArmed = false
+    videoArm.stop()
+    videoHandoff = false
+    videoHandoffHold.stop()
+  }
 
   function beginSearch() {
     searching = true
@@ -698,6 +795,89 @@ Item {
   }
 
   function slotReady(key) { if (key && key === selectedKey) setShown(key) }
+
+  // ------------------------------------------------------------------- clips
+
+  // Assign the wanted clips into slots, preserving any slot that already holds
+  // one: that preservation is the entire mechanism, since a kept slot keeps its
+  // open player. Priority order matters only when there are more wanted clips
+  // than slots, which ±1 plus the outgoing one cannot exceed.
+  function stageVideo() {
+    var t = selected
+    var n = t && t.backgrounds ? t.backgrounds.length : 0
+    // Derived from bgIndex here rather than read off selectedVideoKey, because
+    // this is called from onBgIndexChanged too and the two handlers can run in
+    // either order: reading the derived key would get the previous one, stage
+    // the new background's *neighbours* around the old live clip, and evict the
+    // very preload this exists to keep. Recomputing from raw properties makes
+    // both entry points produce the same answer whichever runs first.
+    var liveKey = Model.videoKeyAt(t, bgIndex)
+    // Track the hand-off here as well, for the same reason: doing it in the key
+    // handler meant a later stageVideo saw prev already advanced to the new key
+    // and dropped the outgoing clip's player while it was still fading.
+    if (liveKey !== videoLiveKey) {
+      videoPrevKey = videoLiveKey
+      videoLiveKey = liveKey
+      // Only a real hand-off between two clips needs the hold. Arriving from a
+      // still-only background has nothing to hold, and leaving for one should
+      // let the outgoing clip go rather than pinning it over its successor.
+      if (videoPrevKey !== "" && liveKey !== "") {
+        videoHandoff = true
+        videoHandoffHold.restart()
+      } else {
+        videoHandoff = false
+        videoHandoffHold.stop()
+      }
+    }
+    var want = []
+    function add(k) { if (k && want.indexOf(k) === -1) want.push(k) }
+    add(liveKey)
+    add(videoPrevKey)
+    if (n > 0) {
+      add(Model.videoKeyAt(t, Model.wrap(bgIndex + 1, n)))
+      add(Model.videoKeyAt(t, Model.wrap(bgIndex - 1, n)))
+    }
+    var s = videoSlots.slice(), i
+    for (i = 0; i < s.length; i++) if (want.indexOf(s[i]) === -1) s[i] = ""
+    for (var w = 0; w < want.length; w++) {
+      if (s.indexOf(want[w]) !== -1) continue
+      var free = s.indexOf("")
+      if (free === -1) break
+      s[free] = want[w]
+    }
+    videoSlots = s
+  }
+
+  Timer {
+    id: videoHandoffHold
+    interval: 320
+    onTriggered: root.videoHandoff = false
+  }
+
+  // videoMoving is an OR across the slots. A root binding cannot depend on a
+  // delegate's property, so each slot reports its own change in instead.
+  function syncVideoMoving() {
+    var any = false
+    for (var i = 0; i < videoSlotCount; i++) {
+      var l = videoStages.itemAt(i)
+      if (l && l.motion) { any = true; break }
+    }
+    videoMoving = any
+  }
+
+  // Whether the clip for `key` is open and could start on the next frame. Reads
+  // the raw slot array and the item directly, never a derived binding: this is
+  // called from onSelectedVideoKeyChanged, where anything derived from the key
+  // is still one step behind — the trap that cost three rounds of this feature.
+  function videoSlotReady(key) {
+    if (!key) return false
+    for (var i = 0; i < videoSlotCount; i++) {
+      if (videoSlots[i] !== key) continue
+      var l = videoStages.itemAt(i)
+      return !!(l && l.status === Loader.Ready && l.item && l.item.loaded)
+    }
+    return false
+  }
 
   // The wipe needs both sides for its whole run, so the key being replaced is
   // held rather than left to the slot bindings to forget. The decision is taken
@@ -1065,33 +1245,85 @@ Item {
         // already cover the seams at either end of a scrub, so nothing here
         // needs to coordinate with them beyond getting out of the way.
         //
-        // Loaded whenever the overlay is open, not when a clip is wanted, so
-        // the first dwell does not pay for component creation. On a machine
-        // without qt6-multimedia this Loader lands in Loader.Error and `item`
-        // stays null — every guard below is false and the picker shows stills.
-        Loader {
-          id: videoLoader
-          anchors.fill: parent
-          z: 2
-          active: root.opened
-          asynchronous: true
-          source: "VideoStage.qml"
-          opacity: (status === Loader.Ready && item && item.showing) ? 1 : 0
-          visible: opacity > 0
-          // Short on purpose. This has to land inside the wipe that revealed
-          // the background, not resolve lazily after it — otherwise the clip
-          // arrives as its own separate event. It is also the seam the design
-          // note warns about: on a DEPART clip it is a no-op between identical
-          // frames, but on an ARRIVE clip it dissolves two different views of
-          // one scene, and a long dissolve there ghosts anything moving.
-          Behavior on opacity { NumberAnimation { duration: 140; easing.type: Easing.InOutQuad } }
-          onLoaded: {
-            item.source = Qt.binding(function() {
-              return Util.fileUrl(Model.videoPath(root.thumbsDir, root.selectedVideoKey))
-            })
-            item.active = Qt.binding(function() { return root.videoLoadable })
-            item.playing = Qt.binding(function() { return root.videoArmed && root.videoAvailable })
-            item.failed.connect(function() { root.videoArmed = false })
+        // One slot per clip (see videoSlots): the live one plus its neighbours
+        // and whichever is still fading out. Only the live slot ever plays or is
+        // seen; the rest are open and paused, which is the whole point of them.
+        // On a machine without qt6-multimedia every one of these Loaders lands
+        // in Loader.Error with a null `item` — every guard below is then false
+        // and the picker shows stills.
+        Repeater {
+          id: videoStages
+          model: root.videoSlotCount
+          Loader {
+            id: videoSlot
+            required property int index
+            readonly property string key: root.videoSlots[index]
+            readonly property bool live: key !== "" && key === root.selectedVideoKey
+            readonly property bool motion: status === Loader.Ready && item
+              && item.motionPlaying && live
+            // The clip handing off. It has to keep the screen, opaque, until the
+            // incoming one has it: two clips fading past each other at 0.5 leave
+            // (1-0.5)*(1-0.5) = 25% of the still showing through at the midpoint,
+            // which was the flash this whole change set out to remove and which a
+            // dual fade cannot avoid — alpha never sums back to opaque. The still
+            // slots have always known this: during a wipe both sides are opaque
+            // and the mask does the work.
+            readonly property bool outgoing: key !== "" && !live
+              && key === root.videoPrevKey && root.videoHandoff
+            anchors.fill: parent
+            // The live clip paints over the one handing off to it, whichever
+            // slot indices the two happen to occupy.
+            z: live ? 3 : 2
+            active: root.opened && key !== ""
+            asynchronous: true
+            source: "VideoStage.qml"
+            opacity: status !== Loader.Ready || !item ? 0
+              : live ? (item.showing ? 1 : 0)
+                     : (outgoing && item.framed ? 1 : 0)
+            visible: opacity > 0
+            // Revealed by the same sweep as the still it belongs to, rather than
+            // dissolved in after it. This is what the design note always claimed
+            // happened — "the wipe masks a clip's start exactly as it masks a
+            // still's" — and did not, because this layer was a sibling of the
+            // slots with its own fade instead of a participant in theirs.
+            layer.enabled: root.wiping && live
+            layer.effect: MultiEffect {
+              maskEnabled: true
+              maskSource: wipeMask
+              maskThresholdMin: root.wipeT
+              maskSpreadAtMin: root.wipeSpread
+            }
+            // Short on purpose. This has to land inside the wipe that revealed
+            // the background, not resolve lazily after it — otherwise the clip
+            // arrives as its own separate event. It is also the seam the design
+            // note warns about: on a DEPART clip it is a no-op between identical
+            // frames, but on an ARRIVE clip it dissolves two different views of
+            // one scene, and a long dissolve there ghosts anything moving.
+            //
+            // Only off the wipe's path: during a wipe the mask is the transition
+            // and both sides are held opaque, so fading here would reintroduce
+            // the bleed the mask exists to avoid. The outgoing slot never fades
+            // either — it cuts once videoHandoff lapses, by which time the
+            // incoming clip is opaque on top of it and the cut cannot be seen.
+            Behavior on opacity {
+              enabled: !root.wiping && videoSlot.live
+              NumberAnimation { duration: 140; easing.type: Easing.InOutQuad }
+            }
+            onMotionChanged: root.syncVideoMoving()
+            onLoaded: {
+              item.source = Qt.binding(function() {
+                return Util.fileUrl(Model.videoPath(root.thumbsDir, videoSlot.key))
+              })
+              item.active = Qt.binding(function() {
+                return root.videoSlotsLoadable && videoSlot.key !== ""
+              })
+              item.playing = Qt.binding(function() {
+                return videoSlot.live && root.videoArmed && root.videoAvailable
+              })
+              // Only the live clip's failure should disarm: a neighbour that
+              // cannot open is a preload we simply do not get.
+              item.failed.connect(function() { if (videoSlot.live) root.videoArmed = false })
+            }
           }
         }
       }
