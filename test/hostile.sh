@@ -58,6 +58,29 @@ if command -v ffmpeg >/dev/null && command -v ffprobe >/dev/null; then
   mk "$U/vidlong";   png "$U/vidlong/backgrounds/clip.png"; clip "$U/vidlong/backgrounds/clip.mp4" 130 1
   # A clip with no still to attach to is not a background and must not become one.
   mk "$U/vidnopair"; png "$U/vidnopair/backgrounds/still.png"; clip "$U/vidnopair/backgrounds/orphan.mp4"
+  # intros/ is where clips belong now, being invisible to stock's -maxdepth 1
+  # background globs. Same stem pairing, same trust boundary.
+  mk "$U/vidintro";  png "$U/vidintro/backgrounds/clip.png"
+                     mkdir -p "$U/vidintro/intros"; clip "$U/vidintro/intros/clip.mp4"
+  # Reached through the extra-backgrounds dir too, which is how a clip attaches
+  # to a root-owned stock theme without writing inside it.
+  mkdir -p "$HOME/.config/omarchy/backgrounds/stockonly/intros"
+                     clip "$HOME/.config/omarchy/backgrounds/stockonly/intros/s.mp4"
+  # Both layouts present: intros/ wins, so migrating a collection is not
+  # ambiguous while a stale copy is still lying beside the still.
+  mk "$U/vidboth";   png "$U/vidboth/backgrounds/clip.png"
+                     clip "$U/vidboth/backgrounds/clip.mp4" 1 6
+                     mkdir -p "$U/vidboth/intros"; clip "$U/vidboth/intros/clip.mp4" 2 6
+  # A symlink inside intros/ is refused on the descriptor exactly as one beside
+  # a still is: the new directory is not a new trust boundary.
+  mk "$U/vidintrosym"; png "$U/vidintrosym/backgrounds/clip.png"
+                     mkdir -p "$U/vidintrosym/intros"
+                     ln -s "$T/outside.mp4" "$U/vidintrosym/intros/clip.mp4"
+  # Upstream's own user layout nests a directory per background hash under
+  # intros/. We do not read that shape, and must ignore it rather than trip on it.
+  mk "$U/vidnest";   png "$U/vidnest/backgrounds/clip.png"
+                     mkdir -p "$U/vidnest/intros/deadbeef"
+                     clip "$U/vidnest/intros/deadbeef/clip.mp4"
 fi
 
 mkdir -p "$U/userbg/backgrounds" "$HOME/.config/omarchy/backgrounds/userbg"; printf 'background = "#000000"\n' >"$U/userbg/colors.toml"
@@ -104,6 +127,13 @@ if (( HAVE_FFMPEG )); then
   check "vidhuge: over ceiling"     "$(t vidhuge '.bgVideos | map(select(. != "")) | length')" 0
   check "vidnopair: orphan ignored" "$(t vidnopair '.bgVideos | map(select(. != "")) | length')" 0
   check "vidnopair: still is still a background" "$(t vidnopair '.backgrounds | map(split("/")[-1]) | join(",")')" "still.png"
+  check "vidintro: intros/ paired by stem" "$(t vidintro '[.backgrounds, .bgVideos] | transpose | map(select(.[1] != "") | (.[0] | split("/")[-1]) + "->" + (.[1] | split("/")[-1])) | join(",")')" "clip.png->clip.mp4"
+  check "vidintro: clip is in intros/"     "$(t vidintro '.bgVideos | map(select(. != "")) | .[0] | split("/")[-2]')" "intros"
+  check "stockonly: extra-bg intros/ pairs" "$(t stockonly '.bgVideos | map(select(. != "")) | length')" 1
+  check "vidboth: intros/ shadows legacy"  "$(t vidboth '.bgVideos | map(select(. != "")) | .[0] | split("/")[-2]')" "intros"
+  check "vidintrosym: symlink refused"     "$(t vidintrosym '.bgVideos | map(select(. != "")) | length')" 0
+  check "vidnest: nested dir ignored"      "$(t vidnest '.bgVideos | map(select(. != "")) | length')" 0
+  check "no clip listed as a background"   "$(q '[.themes[].backgrounds[] | select(test("/intros/"))] | length')" 0
   # These two are listed — the refusal is the decoder's to make, not the inventory's.
   check "vidfake: listed for probing" "$(t vidfake '.bgVideos | map(select(. != "")) | length')" 1
   check "vidlong: listed for probing" "$(t vidlong '.bgVideos | map(select(. != "")) | length')" 1

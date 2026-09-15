@@ -144,8 +144,9 @@ still-only background must leave a blank rather than being skipped. Skipping
 would slide every later clip onto the wrong wallpaper. `videoKeyAt` and the
 hostile suite both pin this.
 
-`sig()` is at `v7` for this shape; bump it whenever `resolve()`'s record
-changes.
+`sig()` is at `v8` for this shape; bump it whenever `resolve()`'s record
+changes. It also stats both `intros/` dirs, or a clip added to the directory
+clips now live in would not invalidate the record that omits it.
 
 ## Direction: which end holds the still
 
@@ -281,21 +282,31 @@ Measure both and keep the better file per clip.
 
 The plugin has no opinion about where a clip came from. Any video you hold the
 rights to becomes an animated background the moment it is named after a still
-and dropped in the theme's directory under `~/.config/omarchy/backgrounds/`:
+and dropped in the theme's `intros/` directory under
+`~/.config/omarchy/backgrounds/`:
 
 ```sh
-mkdir -p ~/.config/omarchy/backgrounds/retro-82
+mkdir -p ~/.config/omarchy/backgrounds/retro-82/intros
 ffmpeg -i your-clip.mp4 -c:v copy -an \
-  ~/.config/omarchy/backgrounds/retro-82/2-dusk-guardian.mp4
+  ~/.config/omarchy/backgrounds/retro-82/intros/2-dusk-guardian.mp4
 ```
+
+**`intros/`, not the background dir itself.** Since #6792 stock globs every
+background dir for video as well as stills, so a clip sitting beside its still
+becomes a second selectable wallpaper — `Super + Ctrl + Space` in a fully covered
+theme cycles twice the entries it should, every other one a loop. A subdirectory
+is invisible to those `-maxdepth 1` globs. A clip left in the old location still
+works, and `index.sh` prefers `intros/` when both exist, so moving a collection is
+just `mkdir intros && mv *.mp4 intros/` per theme.
 
 **The stem is the pairing.** `2-dusk-guardian.mp4` attaches to the background
 whose own file is `2-dusk-guardian.webp`, wherever that background lives — which
 is why this directory and not the theme's: a stock theme is root-owned under
 `/usr/share/omarchy`, and a user theme is often a git checkout whose upstream
 would clobber anything you wrote inside it. Where a theme ships no still by that
-name, put one in the same directory and it becomes a real, selectable background
-with a clip attached.
+name, put one in the theme's background dir — **not** in `intros/`, which exists
+precisely to be invisible to the background globs — and it becomes a real,
+selectable background with a clip attached.
 
 Open the picker once afterwards and `thumbs.sh` transcodes what it finds, so the
 shell's decoder only ever sees bytes our encoder wrote. It drops audio, metadata

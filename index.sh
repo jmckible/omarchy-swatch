@@ -72,10 +72,14 @@ safe_file() {
 sig() {
   local d=$1 f
   {
-    echo v7   # record schema version: bump when resolve() output changes
+    echo v8   # record schema version: bump when resolve() output changes
     stat -Lc '%Y' -- "$d"
     [[ -d $d/backgrounds ]] && stat -c 'bg:%Y' -- "$d/backgrounds"
     [[ -d $user_bgs/${d##*/} ]] && stat -c 'ubg:%Y' -- "$user_bgs/${d##*/}"
+    # Clips live in intros/ now, so a clip added or replaced there has to
+    # invalidate the record exactly as one beside its still always did.
+    [[ -d $d/intros ]] && stat -c 'in:%Y' -- "$d/intros"
+    [[ -d $user_bgs/${d##*/}/intros ]] && stat -c 'uin:%Y' -- "$user_bgs/${d##*/}/intros"
     for f in colors.toml shell.toml alacritty.toml preview.png preview.jpg preview.jpeg preview.webp; do
       [[ -e $d/$f ]] && stat -c "$f:%s:%Y" -- "$d/$f"
     done
@@ -157,11 +161,26 @@ resolve() {
 
   # Animated backgrounds: a clip is an alternative rendering of the background
   # sharing its stem, so it is discovered per background rather than per theme.
-  # Same two dirs and the same order, so a user clip shadows a theme's own.
   # One line per background, empty where there is no clip — position is the
   # pairing, which is why these are not filtered like $bgs is.
+  #
+  # Four dirs, first stem match wins, so a user clip shadows a theme's own and
+  # an intros/ clip shadows a legacy one. intros/ is preferred because stock
+  # tooling cannot see it: since upstream #6792 every background dir is globbed
+  # for video too, so a clip sitting beside its still is *also* a standalone
+  # looping wallpaper in the rotation — Super+Ctrl+Space in a fully covered
+  # theme cycles twice the entries it should. A subdirectory is invisible to
+  # those -maxdepth 1 globs, and themes/<theme>/intros/<stem>.mp4 is exactly
+  # where upstream puts its own packaged intros (#9639), so this reads those for
+  # free if they land. The legacy dirs stay for collections already laid out
+  # that way; they work, they just pollute the rotation.
+  #
+  # Both intros dirs are inside ALLOWED_ROOTS already, so no trust boundary
+  # moves here: same list_files, same ceilings, same descriptor-bound reads.
   local vids vkeys="" vk v bstem vstem
-  vids=$( { LIST_BYTES=$MAX_VIDEO_BYTES list_files "$user_bgs/$name" "$MAX_BACKGROUNDS" "${video_find[@]}"
+  vids=$( { LIST_BYTES=$MAX_VIDEO_BYTES list_files "$user_bgs/$name/intros" "$MAX_BACKGROUNDS" "${video_find[@]}"
+            LIST_BYTES=$MAX_VIDEO_BYTES list_files "$path/intros" "$MAX_BACKGROUNDS" "${video_find[@]}"
+            LIST_BYTES=$MAX_VIDEO_BYTES list_files "$user_bgs/$name" "$MAX_BACKGROUNDS" "${video_find[@]}"
             LIST_BYTES=$MAX_VIDEO_BYTES list_files "$path/backgrounds" "$MAX_BACKGROUNDS" "${video_find[@]}"; } \
           | head -n "$MAX_BACKGROUNDS" )
   while IFS= read -r b; do

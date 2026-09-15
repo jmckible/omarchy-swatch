@@ -184,10 +184,15 @@ Item {
   // fade, plus the worst case where the incoming clip was cold and had to open
   // first; releasing early would put the still back exactly where it was.
   property bool videoHandoff: false
-  // Neighbours open under the same burst suppression as the live clip: a held
-  // arrow preloads nothing, since every background it crosses would want a
-  // different pair.
-  readonly property bool videoSlotsLoadable: opened && viewReady && !applying && !scrubRapid
+  // Deliberately NOT gated on viewReady or scrubRapid, unlike playback. Those
+  // are moment-to-moment states and this decides whether a *player stays open*:
+  // viewReady drops on every rebuild (filtering, a collection change, an index
+  // refresh), and gating on it tore down all four players mid-session — the
+  // clip you were watching lost its frame, and the next arrival paid for a cold
+  // open even on a background that had been warm seconds earlier. Which clips
+  // are slotted is what bounds this, not when they may open; scrubRapid is
+  // handled in stageVideo, which simply declines to restage mid-burst.
+  readonly property bool videoSlotsLoadable: opened && !applying
   readonly property var ansi: Model.ansi(selected)
   readonly property color bg: selected ? selected.colors.background || "#101315" : "#101315"
   readonly property color fg: selected ? selected.colors.foreground || "#cacccc" : "#cacccc"
@@ -483,7 +488,9 @@ Item {
     }
     return JSON.stringify({
       armed: videoArmed, moving: videoMoving, rapid: scrubRapid,
-      wiping: wiping, handoff: videoHandoff, live: selectedVideoKey.slice(0, 8),
+      wiping: wiping, handoff: videoHandoff, ready: viewReady,
+      rebuilding: rebuilding, sel: !!selected,
+      live: selectedVideoKey.slice(0, 8),
       prev: videoPrevKey.slice(0, 8), slots: out
     })
   }
@@ -602,6 +609,11 @@ Item {
       if (!viewReady && bgIndex >= 0) bgStrip.positionViewAtIndex(bgIndex, ListView.Beginning)
       rebuilding = false
       stageBackground()
+      // The clip slots decline to restage while rebuilding, so the rebuild has
+      // to hand back to them on the way out — otherwise a selection that moved
+      // during one leaves them holding the previous theme's clips, or nothing at
+      // all on the rebuild an open starts with.
+      stageVideo()
     })
   }
 
@@ -803,6 +815,16 @@ Item {
   // open player. Priority order matters only when there are more wanted clips
   // than slots, which ±1 plus the outgoing one cannot exceed.
   function stageVideo() {
+    // Nothing to stage is not the same as nothing wanted. A rebuild empties
+    // `rows` for a frame, so `selected` goes null and this used to clear every
+    // slot — killing the player whose frame was still on screen and making the
+    // theme you were already on reload from cold. Hold what we have instead.
+    if (rebuilding || !selected) return
+    // Mid-burst, likewise: the slots a held arrow would want change with every
+    // background it crosses, so restaging would thrash four players for clips
+    // nobody sees. Freezing them also leaves the outgoing clip its frame. The
+    // arm timer restages once movement stops.
+    if (scrubRapid) return
     var t = selected
     var n = t && t.backgrounds ? t.backgrounds.length : 0
     // Derived from bgIndex here rather than read off selectedVideoKey, because
