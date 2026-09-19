@@ -37,6 +37,19 @@ Item {
   Timer { id: curationNotice; interval: 5000; onTriggered: root.curationMessage = "" }
   property var undoHide: null
   readonly property bool backgroundHidden: !!selected && Model.isHidden(preferences, selected.name, selectedBackground)
+  // Stars are read from preferences, never from `rows`. Starring leaves the
+  // strip holding the same themes in the same order, and replacing its model to
+  // carry one flag resets the ListView to its first card for a frame before
+  // rebuild re-centres it — the strip visibly jumps. So a toggle retints labels
+  // in place, and `rows[i].favorite` is left stale until the next rebuild.
+  readonly property bool selectedFavorite: !!selected && isFavorite(selected.name)
+  function isFavorite(name) { return preferences.favorites.indexOf(name) !== -1 }
+  // Names the theme a toggle just starred or unstarred, for exactly the
+  // synchronous write of the new preferences. The stars that animate are the
+  // ones gated on it; delegate reuse and rebuilds also move what a star reads,
+  // and those must still snap.
+  property string favoritePulse: ""
+  property bool favoritePulseOn: false
   property var curatedThemes: []
   property var themes: []
   property string loadedIndex: ""
@@ -412,15 +425,21 @@ Item {
       onStreamFinished: {
         if (!text) return
         try {
-          root.preferences = JSON.parse(text)
+          var next = JSON.parse(text)
+          var command = preferencesProc.command
+          var favorite = command[2] === "favorite"
+          if (favorite) { root.favoritePulseOn = command[4] === "true"; root.favoritePulse = command[3] }
+          root.preferences = next
+          root.favoritePulse = ""
           root.preferencesReady = true
           var landed = root.settleOpeningFavorites()
           root.curatedThemes = Model.curate(root.themes, root.preferences, false, root.showHidden)
           root.undoHide = preferencesProc.nextUndo
           root.curationMessage = preferencesProc.successMessage
-          root.scrubQuick = true
-          if (preferencesProc.command[2] === "favorite" && root.favoritesOnly && !root.filterText) root.transitionCollection()
-          else root.rebuild(landed)
+          if (favorite && root.favoritesOnly && !root.filterText) root.transitionCollection()
+          // A star anywhere else changes no row's membership or order (search
+          // spans the whole collection), so there is nothing to rebuild.
+          else if (!favorite || landed) { root.scrubQuick = true; root.rebuild(landed) }
         } catch (e) { root.curationMessage = "Could not read saved choices" }
       }
     }
@@ -441,7 +460,7 @@ Item {
 
   function toggleFavorite() {
     if (!selected) return
-    saveChoice("favorite", selected.name, !selected.favorite, "", undoHide, "")
+    saveChoice("favorite", selected.name, !selectedFavorite, "", undoHide, "")
   }
 
   function toggleBackgroundHidden() {
@@ -1085,6 +1104,10 @@ Item {
   // not there yet fails to load and is retried on the next cache tick; a load
   // that succeeded is never disturbed. Declarative, so the source binding
   // survives the retry.
+  // The gap a card's star leaves before the name — the width of the space that
+  // used to follow it in one string. A monospace space is not a proportional one.
+  TextMetrics { id: captionSpace; font.family: Style.fontFamily; font.pixelSize: root.fz.caption; text: " " }
+
   component CacheImage: Image {
     property string path: ""
     property int failedAt: -1
@@ -1444,16 +1467,59 @@ Item {
             style: Text.Raised
             styleColor: Util.alpha(root.bg, 0.6)
           }
-          Text {
-            text: "★"
+          Item {
             anchors.verticalCenter: parent.verticalCenter
-            color: titleName.color
-            font.family: Style.fontFamily
-            font.pixelSize: root.sp(28)
-            opacity: root.selected && root.selected.favorite ? 1 : 0
-            scale: opacity > 0 ? 1 : 0.65
-            Behavior on opacity { NumberAnimation { duration: 150 } }
-            Behavior on scale { enabled: root.viewReady && !root.rebuilding; NumberAnimation { duration: 200; easing.type: Easing.OutCubic } }
+            width: titleStarGlyph.implicitWidth
+            height: titleStarGlyph.implicitHeight
+
+            // Scrubbing onto or off a favourite fades the star, as it always
+            // has. Starring one is an act, so it gets an arrival: the glyph
+            // overshoots in and a ring goes out from it. The ring widens rather
+            // than scales so its stroke stays a hairline as it fades.
+            Rectangle {
+              id: titleStarRing
+              property real spread: 0.6
+              anchors.centerIn: parent
+              width: Math.round(titleStarGlyph.font.pixelSize * spread)
+              height: width
+              radius: width / 2
+              color: "transparent"
+              border.color: titleName.color
+              border.width: root.sp(2)
+              opacity: 0
+            }
+            Item {
+              id: titleStarPop
+              anchors.fill: parent
+              Text {
+                id: titleStarGlyph
+                text: "★"
+                color: titleName.color
+                font.family: Style.fontFamily
+                font.pixelSize: root.sp(28)
+                opacity: root.selectedFavorite ? 1 : 0
+                scale: opacity > 0 ? 1 : 0.65
+                Behavior on opacity { NumberAnimation { duration: 150 } }
+                Behavior on scale { enabled: root.viewReady && !root.rebuilding; NumberAnimation { duration: 200; easing.type: Easing.OutCubic } }
+              }
+            }
+            ParallelAnimation {
+              id: titleStarBurst
+              NumberAnimation { target: titleStarPop; property: "scale"; from: 0.45; to: 1; duration: 420; easing.type: Easing.OutBack; easing.overshoot: 3 }
+              NumberAnimation { target: titleStarRing; property: "spread"; from: 0.6; to: 2.1; duration: 520; easing.type: Easing.OutCubic }
+              NumberAnimation { target: titleStarRing; property: "opacity"; from: 0.9; to: 0; duration: 520; easing.type: Easing.OutQuad }
+            }
+            Connections {
+              target: root
+              // Runs inside the preferences write, while favoritePulse is set.
+              function onSelectedFavoriteChanged() {
+                if (!root.favoritePulse || !root.selected || root.selected.name !== root.favoritePulse) return
+                titleStarBurst.stop()
+                titleStarPop.scale = 1
+                titleStarRing.opacity = 0
+                if (root.selectedFavorite) titleStarBurst.start()
+              }
+            }
           }
         }
         Row {
@@ -2072,6 +2138,19 @@ Item {
             required property var modelData
             readonly property bool selected: index === root.selectedIndex
             readonly property int pad: Math.ceil((stripArea.thumbW * stripArea.liveScale - stripArea.cellW) / 2) + root.sp(24)
+            // 0 → 1 as the star arrives. Overshoots on the way in, which the
+            // glyph's scale shows and the name's slide clamps away — a label
+            // that bounces reads as jitter, a star that bounces reads as a pop.
+            readonly property bool favorite: root.isFavorite(modelData.name)
+            property real starT: favorite ? 1 : 0
+            Behavior on starT {
+              enabled: root.favoritePulse === cell.modelData.name
+              NumberAnimation {
+                duration: root.favoritePulseOn ? 420 : 200
+                easing.type: root.favoritePulseOn ? Easing.OutBack : Easing.OutCubic
+                easing.overshoot: 3
+              }
+            }
             width: stripArea.cellW
             height: strip.height
             z: selected ? 2 : 0          // the lifted card, and its shadow, over its neighbours
@@ -2165,9 +2244,29 @@ Item {
                       }
                     }
                   }
+                  // The star was once a prefix on the name. It is its own glyph
+                  // so it can pop in place while the name moves over for it; the
+                  // gap is the space the prefix used to carry.
                   Text {
-                    anchors { left: parent.left; bottom: parent.bottom; leftMargin: root.sp(8); bottomMargin: root.sp(9) }
-                    text: (cell.modelData.favorite ? "★ " : "") + cell.modelData.name
+                    id: cardStar
+                    anchors { left: parent.left; baseline: cardName.baseline; leftMargin: root.sp(8) }
+                    visible: cell.starT > 0
+                    opacity: Math.min(1, cell.starT)
+                    scale: 0.2 + 0.8 * cell.starT
+                    text: "★"
+                    color: cell.modelData.colors.foreground || "#fff"
+                    font.family: Style.fontFamily
+                    font.pixelSize: root.fz.caption
+                    style: Text.Outline
+                    styleColor: Util.alpha(cell.modelData.colors.background || "#000", 0.9)
+                  }
+                  Text {
+                    id: cardName
+                    anchors {
+                      left: parent.left; bottom: parent.bottom; bottomMargin: root.sp(9)
+                      leftMargin: root.sp(8) + Math.round((cardStar.implicitWidth + captionSpace.advanceWidth) * Math.min(1, cell.starT))
+                    }
+                    text: cell.modelData.name
                     textFormat: Text.PlainText
                     color: cell.modelData.colors.foreground || "#fff"
                     font.family: Style.fontFamily
