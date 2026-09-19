@@ -54,6 +54,7 @@ Item {
   property var themes: []
   property string loadedIndex: ""
   property var rows: []
+  readonly property var blankRow: ({name: "", colors: {}, previewKey: ""})
   property bool searching: false
   property string filterText: ""
   property int selectedIndex: -1
@@ -607,6 +608,7 @@ Item {
     rebuilding = true
     var keep = selected ? selected.name : ""
     var keepBackground = selectedBackground
+    var keepBgIndex = bgIndex
     rows = Model.browse(curatedThemes, filterText, "all", favoritesOnly)
     var target = landOnCurrent && currentTheme ? currentTheme : keep
     var i = Model.indexOf(rows, target)
@@ -618,9 +620,20 @@ Item {
       bgIndex = bi === -1 ? 0 : bi
     } else {
       var nextTheme = rows[i]
-      var nextBackground = nextTheme && keep === nextTheme.name ? Model.backgroundIndexOf(nextTheme, keepBackground) : -1
+      var sameTheme = !!nextTheme && keep === nextTheme.name
+      var nextBackground = sameTheme ? Model.backgroundIndexOf(nextTheme, keepBackground) : -1
+      // A background that left the list — hidden, most often — hands its
+      // place to the one that slid up into it, as a deleted row does, rather
+      // than sending the strip back to the top.
+      if (nextBackground === -1 && sameTheme) nextBackground = Model.clamp(keepBgIndex, (nextTheme.backgrounds || []).length)
       bgIndex = nextBackground === -1 ? 0 : nextBackground
     }
+    // A strip whose model did reset is back on its first item by now, and an
+    // index that came out numerically unchanged won't re-fire the binding
+    // that would move it. Put both back before the frame renders; waiting for
+    // the callLater below shows a frame of the wrong cards.
+    strip.currentIndex = selectedIndex
+    bgStrip.currentIndex = bgIndex
     Qt.callLater(function() {
       strip.forceLayout()
       bgStrip.forceLayout()
@@ -709,7 +722,12 @@ Item {
   // two still-only backgrounds never changes selectedVideoKey, so without this
   // the preloads would go stale and the next clip you reach would pay for its
   // own open again.
-  onBgIndexChanged: if (opened) stageVideo()
+  onBgIndexChanged: {
+    // rebuild() assigns bgStrip.currentIndex, which drops its binding; this
+    // carries it from then on, as onSelectedIndexChanged does for the themes.
+    bgStrip.currentIndex = bgIndex
+    if (opened) stageVideo()
+  }
 
   // Also arm when availability itself flips — reopening on the background you
   // left on does not change selectedVideoKey, so the key handler never runs and
@@ -2118,7 +2136,14 @@ Item {
           opacity: root.collectionOpacity
           transform: Translate { y: root.collectionOffset }
           orientation: ListView.Horizontal
-          model: root.rows
+          // A count, not the rows. Handing a ListView a new array whose
+          // contents differ resets it: every card is destroyed and rebuilt, the
+          // view goes back to its first card, and currentIndex to 0 — without
+          // re-reading its binding, whose input has not moved. Most rebuilds
+          // keep the same themes (hiding a background, refreshing the index),
+          // and an unchanged count is no change at all, so the cards stay put
+          // and just re-read their row.
+          model: root.rows.length
           spacing: root.sp(4)
           clip: true
           currentIndex: root.selectedIndex
@@ -2135,16 +2160,18 @@ Item {
           delegate: Item {
             id: cell
             required property int index
-            required property var modelData
+            // Blank for the moment a shorter `rows` has landed and the count
+            // that removes this card has not.
+            readonly property var theme: root.rows[index] || root.blankRow
             readonly property bool selected: index === root.selectedIndex
             readonly property int pad: Math.ceil((stripArea.thumbW * stripArea.liveScale - stripArea.cellW) / 2) + root.sp(24)
             // 0 → 1 as the star arrives. Overshoots on the way in, which the
             // glyph's scale shows and the name's slide clamps away — a label
             // that bounces reads as jitter, a star that bounces reads as a pop.
-            readonly property bool favorite: root.isFavorite(modelData.name)
+            readonly property bool favorite: root.isFavorite(theme.name)
             property real starT: favorite ? 1 : 0
             Behavior on starT {
-              enabled: root.favoritePulse === cell.modelData.name
+              enabled: root.favoritePulse === cell.theme.name
               NumberAnimation {
                 duration: root.favoritePulseOn ? 420 : 200
                 easing.type: root.favoritePulseOn ? Easing.OutBack : Easing.OutCubic
@@ -2203,7 +2230,7 @@ Item {
 
                   Rectangle {
                     anchors.fill: parent
-                    color: cell.modelData.colors.background || "#000"
+                    color: cell.theme.colors.background || "#000"
                   }
 
                   // Painted card: instant, zero I/O. The thumb lands on top.
@@ -2211,13 +2238,13 @@ Item {
                   Column {
                     anchors { left: parent.left; top: parent.top; topMargin: root.sp(10); leftMargin: root.sp(10) + stripArea.skew }
                     spacing: root.sp(5)
-                    Rectangle { width: cell.width * 0.55; height: root.sp(5); color: cell.modelData.colors.accent || "#888" }
-                    Rectangle { width: cell.width * 0.8; height: root.sp(5); color: cell.modelData.colors.foreground || "#ccc"; opacity: 0.8 }
-                    Rectangle { width: cell.width * 0.4; height: root.sp(5); color: cell.modelData.colors.green || "#8c8" }
+                    Rectangle { width: cell.width * 0.55; height: root.sp(5); color: cell.theme.colors.accent || "#888" }
+                    Rectangle { width: cell.width * 0.8; height: root.sp(5); color: cell.theme.colors.foreground || "#ccc"; opacity: 0.8 }
+                    Rectangle { width: cell.width * 0.4; height: root.sp(5); color: cell.theme.colors.green || "#8c8" }
                   }
                   CacheImage {
                     anchors.fill: parent
-                    path: Model.thumbPath(root.thumbsDir, cell.modelData.previewKey)
+                    path: Model.thumbPath(root.thumbsDir, cell.theme.previewKey)
                     cache: true
                     sourceSize: Qt.size(Math.round(width * panel.dpr), Math.round(height * panel.dpr))
                     visible: status === Image.Ready
@@ -2235,7 +2262,7 @@ Item {
                     anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
                     height: root.sp(4)
                     Repeater {
-                      model: Model.ansi(cell.modelData)
+                      model: Model.ansi(cell.theme)
                       Rectangle {
                         required property var modelData
                         width: card.width / 6
@@ -2254,11 +2281,11 @@ Item {
                     opacity: Math.min(1, cell.starT)
                     scale: 0.2 + 0.8 * cell.starT
                     text: "★"
-                    color: cell.modelData.colors.foreground || "#fff"
+                    color: cell.theme.colors.foreground || "#fff"
                     font.family: Style.fontFamily
                     font.pixelSize: root.fz.caption
                     style: Text.Outline
-                    styleColor: Util.alpha(cell.modelData.colors.background || "#000", 0.9)
+                    styleColor: Util.alpha(cell.theme.colors.background || "#000", 0.9)
                   }
                   Text {
                     id: cardName
@@ -2266,13 +2293,13 @@ Item {
                       left: parent.left; bottom: parent.bottom; bottomMargin: root.sp(9)
                       leftMargin: root.sp(8) + Math.round((cardStar.implicitWidth + captionSpace.advanceWidth) * Math.min(1, cell.starT))
                     }
-                    text: cell.modelData.name
+                    text: cell.theme.name
                     textFormat: Text.PlainText
-                    color: cell.modelData.colors.foreground || "#fff"
+                    color: cell.theme.colors.foreground || "#fff"
                     font.family: Style.fontFamily
                     font.pixelSize: root.fz.caption
                     style: Text.Outline
-                    styleColor: Util.alpha(cell.modelData.colors.background || "#000", 0.9)
+                    styleColor: Util.alpha(cell.theme.colors.background || "#000", 0.9)
                   }
                 }
 
@@ -2285,7 +2312,7 @@ Item {
                   ShapePath {
                     fillColor: "transparent"
                     strokeWidth: 1
-                    strokeColor: Util.alpha(cell.modelData.colors.foreground || "#fff", cell.selected ? 0.3 : 0.18)
+                    strokeColor: Util.alpha(cell.theme.colors.foreground || "#fff", cell.selected ? 0.3 : 0.18)
                     startX: stripArea.skew; startY: 0
                     PathLine { x: card.width; y: 0 }
                     PathLine { x: card.width - stripArea.skew; y: card.height }
