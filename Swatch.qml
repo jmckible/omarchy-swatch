@@ -679,7 +679,7 @@ Item {
     previewQuietDelay.stop()
     videoArmed = false
     videoArm.stop()
-    if (selectedVideoKey === "" || applying || !opened) return
+    if (selecting || selectedVideoKey === "" || applying || !opened) return
     // Already open in its own slot: arm on this frame, so the clip plays against
     // the outgoing one rather than after it. The debounce below exists to absorb
     // an open, and a preloaded clip is not paying for one — waiting out 120 ms
@@ -766,8 +766,7 @@ Item {
     var next = wrap ? Model.wrap(selectedIndex + delta, rows.length) : Model.clamp(selectedIndex + delta, rows.length)
     if (next === selectedIndex) return
     noteMove("theme", delta < 0 ? -1 : 1)
-    selectedIndex = next
-    bgIndex = 0
+    selectTheme(next)
   }
 
   function jumpTo(index) {
@@ -775,8 +774,24 @@ Item {
     var next = Model.clamp(index, rows.length)
     if (next === selectedIndex) return
     noteMove("theme", next < selectedIndex ? -1 : 1)
-    selectedIndex = next
+    selectTheme(next)
+  }
+
+  // A theme change is two assignments, and between them selectedKey is the new
+  // theme at the old bgIndex — clamped, so its last background. Left to the
+  // change handlers that key is staged as if it were selected: a screen-size
+  // decode nobody sees, which evicts the first background preloaded for
+  // exactly this move. Hold the handlers off until both have landed.
+  property bool selecting: false
+  function selectTheme(index) {
+    selecting = true
+    selectedIndex = index
     bgIndex = 0
+    selecting = false
+    if (!opened) return
+    stageBackground()
+    stageVideo()
+    disarmVideo()
   }
 
   function moveBackground(delta) {
@@ -797,6 +812,7 @@ Item {
   onSelectedKeyChanged: if (opened) stageBackground()
 
   function stageBackground() {
+    if (selecting) return
     var want = [selectedKey]
     for (var d = 1; d <= 2; d++) {
       if (rows[selectedIndex + d]) want.push(Model.keyAt(rows[selectedIndex + d], 0))
@@ -821,16 +837,22 @@ Item {
           if (s[i] && (s[i] === shownKey || s[i] === wipeFrom)) continue
           if (age[i] < oldest) { oldest = age[i]; victim = i }
         }
-        // Nothing spare: take the oldest unwanted one even if it is still
-        // fading, rather than leaving the selected background unstaged.
+        // Nothing spare: take a slot from a lower-priority preload, never from
+        // the screen. Leaving a background other than a theme's first wants
+        // five keys, none of them the one being shown, and this used to hand
+        // that slot to the last of them — so the far neighbour's wallpaper
+        // loaded into an opaque slot and sat there for fadeDelayMs + fadeMs.
+        // On-screen slots number at most two, so the selected key always finds
+        // room; a preload that does not simply waits for the next move.
         if (victim === -1) {
-          oldest = Infinity
+          var lowest = w
           for (i = 0; i < s.length; i++) {
-            if (want.indexOf(s[i]) !== -1) continue
-            if (age[i] < oldest) { oldest = age[i]; victim = i }
+            if (s[i] && (s[i] === shownKey || s[i] === wipeFrom)) continue
+            var rank = want.indexOf(s[i])
+            if (rank > lowest) { lowest = rank; victim = i }
           }
         }
-        if (victim === -1) break
+        if (victim === -1) continue
         s[victim] = path
         at = victim
       }
@@ -856,7 +878,7 @@ Item {
     // `rows` for a frame, so `selected` goes null and this used to clear every
     // slot — killing the player whose frame was still on screen and making the
     // theme you were already on reload from cold. Hold what we have instead.
-    if (rebuilding || !selected) return
+    if (rebuilding || selecting || !selected) return
     // Mid-burst, likewise: the slots a held arrow would want change with every
     // background it crosses, so restaging would thrash four players for clips
     // nobody sees. Freezing them also leaves the outgoing clip its frame. The
@@ -2155,7 +2177,7 @@ Item {
           cacheBuffer: stripArea.thumbW * 12
           reuseItems: true
           boundsBehavior: Flickable.StopAtBounds
-          onCurrentIndexChanged: if (!root.rebuilding && root.viewReady && currentIndex !== root.selectedIndex && currentIndex >= 0) { root.selectedIndex = currentIndex; root.bgIndex = 0 }
+          onCurrentIndexChanged: if (!root.rebuilding && root.viewReady && currentIndex !== root.selectedIndex && currentIndex >= 0) root.selectTheme(currentIndex)
 
           delegate: Item {
             id: cell
@@ -2326,7 +2348,7 @@ Item {
               width: cell.selected ? card.width * card.scale : cell.width
               height: parent.height
               anchors.centerIn: parent
-              onClicked: { root.selectedIndex = cell.index; root.bgIndex = 0 }
+              onClicked: root.selectTheme(cell.index)
               onDoubleClicked: { root.selectedIndex = cell.index; root.apply() }
             }
           }
