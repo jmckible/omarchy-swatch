@@ -78,6 +78,17 @@ Item {
   property bool liftPending: false
   readonly property int holdFloorMs: 180
 
+  // When the chosen background has an intro, omarchy-theme-set plays it (see
+  // apply.sh) and the desktop under the black is not our still: the shell holds
+  // a cover of the outgoing wallpaper until OWE reports the clip moving, then
+  // fades it over 420 ms. Lifting on the link would uncover the old wallpaper,
+  // so while the shell answers themeIntroStatus "pending" the black holds, and
+  // then lifts straight onto the playing clip — the stage is dropped first,
+  // because its still is the clip's last frame, not what is on screen. A shell
+  // without that IPC never answers "pending", and the link alone decides.
+  property bool introSeen: false
+  property bool introWaiting: false
+
   // Which strip the last move was in, and which way. The transition follows the
   // axis you pressed: themes are a horizontal filmstrip, backgrounds a vertical
   // one, so the motion itself says which list you are moving through.
@@ -278,6 +289,8 @@ Item {
     exitBlur = 0
     blackout = 0
     liftPending = false
+    introSeen = false
+    introWaiting = false
     scrubArmed = false
     scrubQuick = false
     scrubRapid = false   // a stale burst flag would suppress the first clip load
@@ -487,6 +500,9 @@ Item {
   }
 
   function curationStatus() { return JSON.stringify({available: true, ready: preferencesReady, favorites: preferences.favorites.length, viewReady: viewReady}) }
+
+  // Side-effect-free. Where the last exit got to in waiting for a desktop intro.
+  function introStatus() { return JSON.stringify({seen: introSeen, waiting: introWaiting}) }
 
   // Side-effect-free, like curationStatus. Whether a clip plays inside the wipe
   // or after it is not visible in any log, and the difference is one frame of
@@ -1018,6 +1034,8 @@ Item {
     if (!t || applying) return
     resetCollectionTransition()
     applying = true
+    introSeen = false
+    introWaiting = false
     chromeOpacity = 0
     if (pickDir) { finishPick(t.name); dismiss(); return }
 
@@ -1037,36 +1055,48 @@ Item {
   }
 
   // omarchy-theme-bg-set writes the current-background symlink before it asks
-  // the shell to swap, so the link resolving to our choice is the go signal.
+  // the shell to swap, so the link resolving to our choice is the go signal —
+  // unless an intro is pending, which outranks it (see introSeen).
   // Nothing else about the swap is observable from out here — the decode and
   // the shell's own reveal both finish unseen, which is exactly what the black
   // is for. We lift on the signal, not on a guess.
-  readonly property string backgroundLink: home + "/.local/state/omarchy/current/background"
 
   Timer { id: landPoll; interval: 100; repeat: true; onTriggered: if (!landProc.running) landProc.running = true }
   Timer { id: landDeadline; interval: 3000; onTriggered: root.landed() }
 
   Process {
     id: landProc
-    command: ["readlink", "-f", "--", root.backgroundLink, root.applyTarget]
+    command: [root.scriptPath("land.sh"), root.applyTarget]
     stdout: StdioCollector { waitForEnd: true; onStreamFinished: root.checkLanded(text) }
   }
 
-  // The last two lines are this run's pair: what the desktop's link points at,
-  // and what we asked for, both canonicalised — so this compares destinations,
-  // not how either path happened to be spelled.
+  // What the desktop's link points at and what we asked for, both
+  // canonicalised — so this compares destinations, not how either path happened
+  // to be spelled — then the intro status. A pending intro swaps the 3 s
+  // deadline for a longer one and keeps the poll running until it is over.
   function checkLanded(text) {
     if (!applying) return
-    var lines = String(text || "").trim().split("\n")
-    if (lines.length < 2) return
-    if (lines[lines.length - 2] === lines[lines.length - 1]) landed()
+    var lines = String(text || "").split("\n")
+    if (lines.length < 3) return
+    var pending = lines[2] === "pending"
+    if (pending) {
+      introSeen = true
+      if (!introWaiting) { introWaiting = true; landDeadline.stop(); introDeadline.restart() }
+      return
+    }
+    if (lines[0] === lines[1] || introWaiting) landed()
   }
 
   function landed() {
     landPoll.stop()
     landDeadline.stop()
+    introDeadline.stop()
+    introWaiting = false
     requestLift()
   }
+
+  // The shell's own fallback reveals after 10 s; ours gets out of the way first.
+  Timer { id: introDeadline; interval: 8000; onTriggered: root.landed() }
 
   // The lift can be asked for before the dip has finished — a background that
   // was already current answers on the first poll — so it queues behind it.
@@ -1077,7 +1107,7 @@ Item {
   }
 
   function cancelExit() {
-    landPoll.stop(); landDeadline.stop()
+    landPoll.stop(); landDeadline.stop(); introDeadline.stop()
     dipDown.stop(); liftUp.stop()
     liftPending = false
   }
@@ -1102,6 +1132,7 @@ Item {
   SequentialAnimation {
     id: liftUp
     PauseAnimation { duration: root.holdFloorMs }
+    ScriptAction { script: if (root.introSeen) stage.opacity = 0 }
     ParallelAnimation {
       NumberAnimation { target: root; property: "blackout"; to: 0; duration: 300; easing.type: Easing.OutQuad }
       NumberAnimation { target: root; property: "exitBlur"; to: 0; duration: 640; easing.type: Easing.OutCubic }
@@ -1109,6 +1140,7 @@ Item {
     }
     // The cover is sharp again and identical to the desktop under it, so this
     // last crossfade is invisible — the matching image finally paying off.
+    // (After an intro the stage is already gone and this is a no-op.)
     NumberAnimation { target: stage; property: "opacity"; to: 0; duration: 160 }
     onFinished: root.dismiss()
   }

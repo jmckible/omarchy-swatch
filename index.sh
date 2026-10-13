@@ -50,7 +50,11 @@ if p=$(read_bounded "$index" "$MAX_INDEX_BYTES") && jq -e '.themes | type == "ar
 fi
 
 image_find=(-type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.webp' -o -iname '*.gif' \))
-video_find=(-type f \( -iname '*.mp4' -o -iname '*.webm' -o -iname '*.mkv' \))
+# omarchy-theme-bg-boot-intro's extensions, in its order, less avi: m4v and mov
+# are the ISO-BMFF container VIDEO_FORMATS already admits, avi is a decoder we
+# decline to reach.
+intro_exts=(mp4 m4v mov webm mkv)
+video_find=(-type f \( -name '*.mp4' -o -name '*.m4v' -o -name '*.mov' -o -name '*.webm' -o -name '*.mkv' \))
 
 # Inventory filter, advisory only: a directory entry is listed when it is a
 # regular non-symlink file with a bounded path that resolves under one of
@@ -72,13 +76,13 @@ safe_file() {
 sig() {
   local d=$1 f
   {
-    echo v8   # record schema version: bump when resolve() output changes
+    echo v9   # record schema version: bump when resolve() output changes
     stat -Lc '%Y' -- "$d"
     [[ -d $d/backgrounds ]] && stat -c 'bg:%Y' -- "$d/backgrounds"
     [[ -d $user_bgs/${d##*/} ]] && stat -c 'ubg:%Y' -- "$user_bgs/${d##*/}"
-    # Clips live in intros/ now, so a clip added or replaced there has to
-    # invalidate the record exactly as one beside its still always did.
-    [[ -d $d/intros ]] && stat -c 'in:%Y' -- "$d/intros"
+    # A clip added to or replaced in either intros/ dir has to invalidate the
+    # record that omits it.
+    [[ -d $d/backgrounds/intros ]] && stat -c 'in:%Y' -- "$d/backgrounds/intros"
     [[ -d $user_bgs/${d##*/}/intros ]] && stat -c 'uin:%Y' -- "$user_bgs/${d##*/}/intros"
     for f in colors.toml shell.toml alacritty.toml preview.png preview.jpg preview.jpeg preview.webp; do
       [[ -e $d/$f ]] && stat -c "$f:%s:%Y" -- "$d/$f"
@@ -159,39 +163,35 @@ resolve() {
   [[ -n $preview ]] && pkey=$(image_key "$preview")
   while IFS= read -r b; do [[ -n $b ]] && bgkeys+="$(image_key "$b")"$'\n'; done <<<"$bgs"
 
-  # Animated backgrounds: a clip is an alternative rendering of the background
-  # sharing its stem, so it is discovered per background rather than per theme.
-  # One line per background, empty where there is no clip — position is the
-  # pairing, which is why these are not filtered like $bgs is.
+  # Intros: a clip is the background it lands on, in motion, so it is found
+  # per background rather than per theme. One line per background, empty where
+  # there is none — position is the pairing, which is why these are not
+  # filtered like $bgs is.
   #
-  # Four dirs, first stem match wins, so a user clip shadows a theme's own and
-  # an intros/ clip shadows a legacy one. intros/ is preferred because stock
-  # tooling cannot see it: since upstream #6792 every background dir is globbed
-  # for video too, so a clip sitting beside its still is *also* a standalone
-  # looping wallpaper in the rotation — Super+Ctrl+Space in a fully covered
-  # theme cycles twice the entries it should. A subdirectory is invisible to
-  # those -maxdepth 1 globs, and themes/<theme>/intros/<stem>.mp4 is exactly
-  # where upstream puts its own packaged intros (#9639), so this reads those for
-  # free if they land. The legacy dirs stay for collections already laid out
-  # that way; they work, they just pollute the rotation.
-  #
-  # Both intros dirs are inside ALLOWED_ROOTS already, so no trust boundary
-  # moves here: same list_files, same ceilings, same descriptor-bound reads.
-  local vids vkeys="" vk v bstem vstem
-  vids=$( { LIST_BYTES=$MAX_VIDEO_BYTES list_files "$user_bgs/$name/intros" "$MAX_BACKGROUNDS" "${video_find[@]}"
-            LIST_BYTES=$MAX_VIDEO_BYTES list_files "$path/intros" "$MAX_BACKGROUNDS" "${video_find[@]}"
-            LIST_BYTES=$MAX_VIDEO_BYTES list_files "$user_bgs/$name" "$MAX_BACKGROUNDS" "${video_find[@]}"
-            LIST_BYTES=$MAX_VIDEO_BYTES list_files "$path/backgrounds" "$MAX_BACKGROUNDS" "${video_find[@]}"; } \
-          | head -n "$MAX_BACKGROUNDS" )
+  # Resolved exactly as omarchy-theme-bg-boot-intro resolves the clip OWE will
+  # play: <the still's own dir>/intros/<stem>.<ext>, extensions in its order,
+  # stills of its image types only. So a stock still never reaches a user clip
+  # and a user still never inherits a theme's clip by sharing its stem, and the
+  # picker never animates a background the desktop would not. A clip beside its
+  # still is a looping wallpaper in stock's rotation, not an intro, and is not
+  # read. Both intros dirs are inside ALLOWED_ROOTS: same list_files, same
+  # ceilings, same descriptor-bound reads downstream.
+  local vk v bstem ext
+  local -A vids=()
+  while IFS= read -r v; do [[ -n $v ]] && vids[$v]=1; done < <(
+    LIST_BYTES=$MAX_VIDEO_BYTES list_files "$user_bgs/$name/intros" "$MAX_BACKGROUNDS" "${video_find[@]}"
+    LIST_BYTES=$MAX_VIDEO_BYTES list_files "$path/backgrounds/intros" "$MAX_BACKGROUNDS" "${video_find[@]}")
+  local vkeys=""
   while IFS= read -r b; do
     [[ -n $b ]] || continue
-    bstem=${b##*/}; bstem=${bstem%.*}
-    # First clip whose stem matches wins, preserving user-dir-first order.
-    vk=$(while IFS= read -r v; do
-           [[ -n $v ]] || continue
-           vstem=${v##*/}; vstem=${vstem%.*}
-           [[ $vstem == "$bstem" ]] && { printf '%s' "$v"; break; }
-         done <<<"$vids")
+    bstem=${b##*/}; bstem=${bstem%.*}; vk=""
+    case ${b,,} in
+      *.jpg | *.jpeg | *.png | *.bmp | *.webp)
+        for ext in "${intro_exts[@]}"; do
+          v="${b%/*}/intros/$bstem.$ext"
+          [[ -n ${vids[$v]:-} ]] && { vk=$v; break; }
+        done ;;
+    esac
     bgvids+="$vk"$'\n'
     if [[ -n $vk ]]; then vkeys+="$(image_key "$vk")"$'\n'; else vkeys+=$'\n'; fi
   done <<<"$bgs"

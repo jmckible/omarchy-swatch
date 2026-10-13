@@ -6,20 +6,21 @@ replaced it and why.
 
 ## The model
 
-A background may have an **animated alternative**: a video sharing its stem, at
-any extension.
+A background may have an **intro**: a video sharing its stem, in an `intros/`
+directory beside it.
 
 ```
-backgrounds/3-sunset-lake.webp   the background
-backgrounds/3-sunset-lake.mp4    the same background, animated
+backgrounds/3-sunset-lake.webp          the background
+backgrounds/intros/3-sunset-lake.mp4    the same background, arriving
 ```
 
 One background, two renderings. The still is canonical — it is what the desktop
-gets on apply, and what the filmstrip and every derivative are built from. The
-video is what the *picker* shows while that background is selected.
+rests on, and what the filmstrip and every derivative are built from. The video
+is what the picker shows while that background is selected, and what Omarchy
+plays on the desktop when you arrive on it.
 
-That last point is the whole design: an animated background is a preview
-affordance, not a boot sequence.
+This is upstream's layout and upstream's rule (#9639, below), adopted exactly
+so that the picker never animates a background the desktop would not.
 
 ## Why not the intro model
 
@@ -46,26 +47,73 @@ fade into the still. The scrub wipes stay exactly as built; only what the stage
 renders changes. Apply-time motion→still is already covered by the exit through
 black.
 
-## Why this decouples us from Omarchy 4.1
+## Upstream intros (#9639)
 
-"Boot intro" is a shell-owned concept — it concerns what happens when you land
-or boot, so it has to wait for the shell to define playback. "Animated
-alternative shown during preview" is entirely our own surface: it is what the
-picker draws while scrubbing, which Swatch already owns outright.
+The bet this document used to describe — that a per-background clip was ours to
+define before Omarchy decided how the shell plays one — is settled. #9639 merged
+on 2026-10-07 and ships intros in `themes/<theme>/backgrounds/intros/`; the
+dev channel has trimmed that to at most one per theme (`32481c89`) without
+changing the shape. Playback is not the shell's at all: **OWE** (`owe`, a
+separate daemon) owns every video on the desktop, and the shell draws stills
+only — `qs.Ui.BackgroundVideo` is gone and the shell no longer imports
+QtMultimedia.
 
-CLAUDE.md used to gate this work on "after Omarchy 4.1 defines how the shell
-plays them". That was a gate on the *intro* framing and does not bind this
-model; nothing blocks it now, `qt6-multimedia` below having been settled
-upstream.
+`omarchy-theme-bg-boot-intro --resolve-only <still>` is the resolver, and
+`index.sh` reproduces it rather than approximating it:
 
-The bet held. Omarchy has since defined shell playback both ways — looping video
-wallpapers (#6792, merged) and per-boot intros (#9639, open) — and neither
-touches this surface. Upstream's intro is keyed per background and paired by
-stem, the same two choices made here, which is reassuring rather than
-competitive: it plays once when you boot, this plays whenever you scrub. The two
-can hold the same file and mean different things by it. What upstream's framing
-does buy it is a cross-fade at the end, and that is the one place its clips and
-ours diverge — see Direction below.
+- `<the still's own dir>/intros/<stem>.<ext>`, extensions tried in the order
+  `mp4 m4v mov webm mkv avi`, matched case-sensitively. We stop before `avi`: a
+  decoder we decline to reach for a container nobody ships.
+- Only `jpg jpeg png bmp webp` stills resolve; a `gif` gets no intro.
+- *Its own dir.* A stock still never reaches a clip under
+  `~/.config/omarchy/backgrounds/<theme>/intros/`, and a still there never
+  inherits a theme's clip by sharing its stem. This retired the old
+  four-directory search (user `intros/` first, then the theme's, then clips
+  beside stills) which existed to attach clips to root-owned stock themes —
+  something that, under upstream's rule, only ever animated the preview.
+
+It plays at login and on a theme switch to a *different* theme, unless
+`~/.local/state/omarchy/toggles/background-intros-off` exists or Hyprland's
+animations are off. Cycling backgrounds within a theme never plays one.
+
+### Enter hands the switch to stock
+
+`apply.sh` normally sets the background first and runs `omarchy-theme-set`
+under `OMARCHY_THEME_SKIP_BACKGROUND=1` — one swap, the previewed one (see
+CLAUDE.md, Transitions). That variable also skips the whole intro: theme-set
+resolves, prepares and plays an intro only inside its own background path. So
+when an intro *would* play — same four checks as theme-set, its own resolver
+for the clip — `apply.sh` does not set the background. It pins it instead,
+through the per-theme memory `choose_theme_background()` reads for a theme
+being switched *to* (`~/.local/state/omarchy/theme-backgrounds/<theme>`), and
+lets theme-set run unmodified. That memory only decides for a different theme;
+for the same one it cycles from the current link — which is fine, since no
+intro plays then either.
+
+On the way out the overlay cannot lift on the link any more. theme-set calls
+`prepareThemeIntro`, which holds a cover of the *outgoing* wallpaper, sets the
+link, starts OWE on the clip's first frame, and only once the clip is advancing
+fades that cover over 420 ms. Lifting on the link would uncover the old
+wallpaper. So `land.sh` also asks `omarchy-shell shell themeIntroStatus
+<token>` — the probe theme-set itself polls, the token being the staged theme
+dir's `%d:%i`, asked of `next-theme` and `current/theme` because `mv` keeps the
+inode across the swap — and while it answers `pending` the black holds (8 s
+ceiling; the shell's own fallback is 10 s). Then the stage is dropped and the
+black lifts straight onto the playing clip; our still is the clip's *last*
+frame, so crossfading it over a clip that has just started would be the seam.
+
+Plugins get a scoped `shell` facade, not the shell root, so `shell.bootIntro`
+is not reachable from here; the IPC is the contract.
+
+### The memory theme-set files under the wrong theme
+
+`remember_current_theme_background()` records the outgoing theme's wallpaper
+from the current link before anything else. Setting the background first has
+already moved that link, so every cross-theme apply through Swatch used to file
+the *incoming* theme's wallpaper under the *outgoing* one, and the next stock
+switch back landed on it. The skip path now puts back what the outgoing theme
+was showing after theme-set returns. The intro path never moves the link early
+and needs no repair.
 
 ## qt6-multimedia is optional, and the isolation stays
 
@@ -75,18 +123,17 @@ ours diverge — see Direction below.
 quickshell → qt6-base, qt6-declarative, qt6-svg, qt6-wayland
 ```
 
-Omarchy did not declare it either when this was written, which was the whole
-argument for isolating the import. **That changed**: native video wallpaper
-support (upstream #6792, merged 2026-09-06) added `qt6-multimedia` and
-`qt6-multimedia-ffmpeg` to `omarchy-base.packages` and back-filled existing
-installs through migration `1786609204.sh`. On a current Omarchy the module is
-guaranteed, and the shell's own `qs.Ui.BackgroundVideo` depends on it.
+Omarchy has declared it in `omarchy-base.packages` since #6792 and back-filled
+existing installs through migration `1786609204.sh` — but its own shell no
+longer uses it: OWE plays desktop video, and the shell draws stills only.
+That makes Swatch the module's one consumer in the shell process, which is all
+the more reason not to assume it.
 
-The isolation is still not optional, for two reasons that outlive the
-dependency: an install that predates that migration still lacks the module, and
-Swatch is a Quickshell plugin that nothing stops from being mounted outside
-Omarchy. `import QtMultimedia` is a hard error at component load, so either case
-would take the whole overlay down rather than degrade.
+The isolation is not optional: an install that predates that migration lacks
+the module, a future one may stop declaring it now that nothing in the shell
+needs it, and Swatch is a Quickshell plugin that nothing stops from being
+mounted outside Omarchy. `import QtMultimedia` is a hard error at component
+load, so any of those would take the whole overlay down rather than degrade.
 
 Hence `VideoStage.qml`. It is the only file that imports QtMultimedia, and
 `Swatch.qml` reaches it through a `Loader`. A missing module lands that Loader
@@ -144,14 +191,19 @@ still-only background must leave a blank rather than being skipped. Skipping
 would slide every later clip onto the wrong wallpaper. `videoKeyAt` and the
 hostile suite both pin this.
 
-`sig()` is at `v8` for this shape; bump it whenever `resolve()`'s record
-changes. It also stats both `intros/` dirs, or a clip added to the directory
-clips now live in would not invalidate the record that omits it.
+`sig()` is at `v9` (the move to upstream's resolution rule); bump it whenever
+`resolve()`'s record changes. It also stats both `intros/` dirs —
+`<theme>/backgrounds/intros` and `~/.config/omarchy/backgrounds/<theme>/intros`
+— or a clip added there would not invalidate the record that omits it.
 
 ## Direction: which end holds the still
 
 A clip meets its still at exactly one end, and which end is a property of the
-footage, not a convention we pick. Across the 77 clips now installed every one
+footage, not a convention we pick. Upstream now writes the convention down —
+an intro "opens on its scene setup and ends on the matching still" — so every
+clip it ships is meant to be ARRIVE. The measurements below were taken on a
+personal 77-clip set (2026-09-15) that is no longer installed; the method is
+what carries over. Across those 77 clips every one
 lands under 8, and the set is overwhelmingly ARRIVE — 73 of 77, from
 `last-horizon/omarchy` at 0.00 to `retro-82/1-in-the-groove` at 5.84. The four
 exceptions are worth knowing by name:
@@ -182,9 +234,11 @@ solitude already had, and the extra background was never needed. Only
 `last-horizon/omarchy` genuinely lands somewhere no theme ships — its best
 shipped match is 16.57, comfortably outside the threshold.
 
-**An upstream clip is not guaranteed to have a seam at all.** Omarchy's boot
-intros cross-fade into the still over their final 750 ms, so they are authored
-without needing either end to be pixel-exact, and `solitude/1-on-pole` is one
+**An upstream clip is not guaranteed to have a seam at all.** The draft-era
+intros cross-faded into the still over their final 750 ms, so they were authored
+without needing either end to be pixel-exact (since merging, OWE owns the hand
+back to the still and upstream has been re-cutting clips to land exactly —
+"Land the Kanagawa intro exactly on its wallpaper", `81504b08`). `solitude/1-on-pole` was one
 that isn't: 45.61 first, 33.19 last, against a still its own theme ships. Swatch
 has no cross-fade to hide that with by design (below), so measure an upstream
 clip before adopting it rather than trusting that it was paired carefully — 74 of
@@ -261,57 +315,40 @@ does not need a policy.
 
 ## Getting clips
 
-No footage ships in this repo, and none will. The clips in the README and the
-demo are [@yamzeight](https://x.com/yamzeight)'s work; crediting him is not the
-same as being licensed to redistribute him, so you fetch your own copy. If you
-use his footage anywhere public, credit him there too — it is the whole reason
-the feature has anything to demonstrate.
+**Omarchy ships them.** Since #9639 most stock themes carry an intro for one of
+their backgrounds, and the picker animates those with no setup at all — the
+footage is [@yamzeight](https://x.com/yamzeight)'s, contributed under Omarchy's
+MIT license; if you show it anywhere public, credit him there. No footage ships
+in *this* repo, and none will.
 
-**Upstream is now the place to fetch it from.** yamz8 has contributed 55
-photographic intros (#9639) and 20 generated wordmark intros (#11906) to Omarchy
-under its MIT license, as `themes/<theme>/intros/<background stem>.mp4` — the
-same stem pairing this document describes, arrived at independently. Both were
-still open drafts against `quattro` when this was written, so they are fetched
-from the PR head rather than found on disk; if they merge, every Omarchy install
-has a stem-matched clip for most stock backgrounds and the picker can animate
-with no setup at all. That is a far better default than a scrape: these are the
-authored edits at full length, where a scrape is typically truncated. It is not
-uniformly higher quality, though — the packaged set is compressed to fit in the
-repo, so a 1080p scrape can carry five times the bitrate of its 720p counterpart.
-Measure both and keep the better file per clip.
-
-The plugin has no opinion about where a clip came from. Any video you hold the
-rights to becomes an animated background the moment it is named after a still
-and dropped in the theme's `intros/` directory under
-`~/.config/omarchy/backgrounds/`:
+For your own, the still and the clip go together, because an intro belongs to
+the directory its still is in:
 
 ```sh
 mkdir -p ~/.config/omarchy/backgrounds/retro-82/intros
+cp dusk.webp ~/.config/omarchy/backgrounds/retro-82/2-dusk-guardian.webp
 ffmpeg -i your-clip.mp4 -c:v copy -an \
   ~/.config/omarchy/backgrounds/retro-82/intros/2-dusk-guardian.mp4
 ```
 
-**`intros/`, not the background dir itself.** Since #6792 stock globs every
-background dir for video as well as stills, so a clip sitting beside its still
-becomes a second selectable wallpaper — `Super + Ctrl + Space` in a fully covered
-theme cycles twice the entries it should, every other one a loop. A subdirectory
-is invisible to those `-maxdepth 1` globs. A clip left in the old location still
-works, and `index.sh` prefers `intros/` when both exist, so moving a collection is
-just `mkdir intros && mv *.mp4 intros/` per theme.
+That still is a real, selectable background in the stock rotation, and both
+Swatch and the desktop play its intro. A clip there named after a *stock* still
+attaches to nothing: upstream resolves `intros/` beside the still, never across
+directories, and Swatch follows it rather than animate a preview the desktop
+will not match.
 
-**The stem is the pairing.** `2-dusk-guardian.mp4` attaches to the background
-whose own file is `2-dusk-guardian.webp`, wherever that background lives — which
-is why this directory and not the theme's: a stock theme is root-owned under
-`/usr/share/omarchy`, and a user theme is often a git checkout whose upstream
-would clobber anything you wrote inside it. Where a theme ships no still by that
-name, put one in the theme's background dir — **not** in `intros/`, which exists
-precisely to be invisible to the background globs — and it becomes a real,
-selectable background with a clip attached.
+**`intros/`, not the background dir itself.** Stock globs every background dir
+for video as well as stills (#6792), so a clip sitting beside its still is a
+standalone looping wallpaper in the rotation, not an intro — Swatch does not
+read it as one. A subdirectory is invisible to those `-maxdepth 1` globs.
+Upstream's *user* intro path that nests a directory per background SHA-256
+(`intros/<hash>/`) is ignored rather than tripped on.
 
 Open the picker once afterwards and `thumbs.sh` transcodes what it finds, so the
 shell's decoder only ever sees bytes our encoder wrote. It drops audio, metadata
 and subtitles in the process; the `-an` above is only so the file you keep is as
-small as the one we use.
+small as the one we use. OWE plays your original file on the desktop; what it
+does with untrusted bytes is upstream's posture, not ours.
 
 ## Test footage
 
